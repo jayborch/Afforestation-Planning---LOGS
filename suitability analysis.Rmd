@@ -1,0 +1,1400 @@
+---
+title: "Afforestation planning in Iceland"
+author: "J.P.Borchard"
+date: "2025-10-16"
+output: html_document
+---
+
+### Background
+
+The motivation for this work lies in supporting strategic afforestation planning in Iceland through an integrated, data-driven approach that combines ecological and socio-economic factors. Iceland faces unique challenges for reforestation due to its harsh climate, fragile soils, and fragmented forests. To guide future conservation efforts, this project develops a multi-scale ecological niche modeling  framework that predicts the suitability of forest establishment across the landscape. By linking broad-scale climatic predictors with fine-scale terrain and remote-sensing embeddings, the model captures both environmental gradients and local variability. The inclusion of social preference layers—such as proximity to roads and population-weighted distance from towns—reflects a holistic planning philosophy that integrates ecological potential with human accessibility and social acceptance. Ultimately, the aim is to provide a transparent approach for prioritizing afforestation sites that balance ecological restoration goals with practical and societal considerations. 
+
+### Predicting ecologically suitable areas
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r include = F}
+
+library(raster)
+library(terra)
+library(sf)
+library(dplyr)
+library(leaflet)
+library(whitebox)
+library(RSAGA)
+library(randomForest)
+library(foreign)
+library(blockCV)
+library(caret)
+library(spdep)
+
+```
+
+```{r include = F}
+whitebox::wbt_init()
+
+
+```
+
+```{r include = F}
+# --- 1) Load Iceland shapefile ---
+iceland_shape <- vect("data/Iceland_shapefile/is_1km.shp")
+
+```
+
+```{r include = F}
+set.seed(123)
+
+skoglendi <- vect("data/forests/raektad_skoglendi_Island_07052025.shp")
+natturu_birki <- vect("data/forests/Natturulegt_birkilendi_Island_15052025.shp")
+
+pts_skoglendi <- spatSample(skoglendi, size = 5000, method = "random")
+pts_birki <- spatSample(natturu_birki, size = 5000, method = "random")
+
+# --- 3) Combine both point sets ---
+pts_combined <- rbind(pts_skoglendi, pts_birki)
+
+# --- 4) Check result ---
+nrow(pts_combined)  # should be 4000
+
+# --- 5) Plot to verify visually ---
+plot(skoglendi, border = "darkgreen", col = "lightgreen")
+plot(natturu_birki, border = "brown", add = TRUE)
+points(pts_combined, col = "red", pch = 16)
+
+iceland_crs <- "+proj=lcc +lat_0=65 +lon_0=-19 +lat_1=64.25 +lat_2=65.75 +x_0=2700000 +y_0=300000 +ellps=GRS80 +units=m +no_defs"
+presence_locations <- project(pts_combined, iceland_crs)
+
+```
+
+## Sampling psuedo-absences for SDM from habitat map
+
+```{r}
+
+# --- Birch habitat suitability weights (0–1 scale) ---
+# Natural types = positive weights
+# Artificial / built-up / roads = 0
+
+birch_weights <- data.frame(
+  Value = 1:65,  # expanded to include anthropogenic types
+  Vistgerd = c(
+    "L1.1 Eyðimelavist",
+    "L1.2 Grasmelavist",
+    "L1.3 Mosamelavist",
+    "L1.4 Víðimelavist",
+    "L1.5 Sanda- og vikravist",
+    "L3.3 Ljónslappaskriðuvist",
+    "L3.1 Urðarskriðuvist",
+    "L3.2 Grasvíðiskriðuvist",
+    "L4.2 Auravist",
+    "L4.1 Eyravist",
+    "L5.1 Hélumosavist",
+    "L5.2 Melagambravist",
+    "L5.3 Hraungambravist",
+    "L6.2 Fléttuhraunavist",
+    "L6.1 Eyðihraunavist",
+    "L6.4 Lynghraunavist",
+    "L6.3 Mosahraunavist",
+    "L2.1 Moldavist",
+    "L7.7 Sjávarkletta- og eyjavist",
+    "L7.4 Grashólavist",
+    "L7.6 Gulstararfitjavist",
+    "L7.3 Strandmelhólavist",
+    "L7.5 Sjávarfitjungsvist",
+    "L7.2 Malarstrandarvist",
+    "L7.1 Sandstrandarvist",
+    "L8.1 Dýjavist",
+    "L8.14 Gulstararflóavist",
+    "L8.4 Hrossanálarvist",
+    "L8.11 Brokflóavist",
+    "L8.10 Hengistararflóavist",
+    "L8.12 Starungsflóavist",
+    "L8.9 Starungsmýravist",
+    "L8.2 Rekjuvist",
+    "L8.6 Runnamýravist á láglendi",
+    "L8.5 Runnamýravist á hálendi",
+    "L8.8 Rústamýravist",
+    "L8.3 Sandmýravist",
+    "L8.13 Tjarnastararflóavist",
+    "L9.7 Blómgresisvist",
+    "L9.3 Bugðupuntsvist",
+    "L9.5 Grasengjavist",
+    "L9.2 Finnungsvist",
+    "L9.6 Língresis- og vingulsvist",
+    "L9.4 Snarrótarvist",
+    "L9.1 Stinnastararvist",
+    "L10.6 Fjalldrapamóavist",
+    "L10.5 Fléttumóavist",
+    "L10.4 Grasmóavist",
+    "L10.7 Lyngmóavist á hálendi",
+    "L10.8 Lyngmóavist á láglendi",
+    "L10.1 Mosamóavist",
+    "L10.2 Flagmóavist",
+    # --- Anthropogenic categories ---
+    "L11.1 Ræktarlönd",               # cultivated/agricultural land
+    "L11.2 Túngrónir reitir",          # hayfields/pastures
+    "L12.1 Vegsvæði",                 # roads
+    "L12.2 Þéttbýli / byggð",         # built-up area
+    "L12.3 Flugvellir / iðnaðarsvæði",# airports / industry
+    "L12.4 Námur",                    # quarries
+    "L12.5 Vökvafylltar lón",         # reservoirs
+    "L12.6 Skógræktarsvæði",          # forest plantations (may have birch)
+    
+    "L14.1 Þéttbýli og annað manngert land",
+    "L14.4 Alaskalúpína",
+    "V1 Vötn",
+    "L11 Birkiskógur",
+    "L14.3 Skógrækt"
+    	
+  ),
+  Birch_weight = c(
+    0.05, 0.10, 0.30, 0.10, 0.05, 0.15, 0.10, 0.20, 0.05, 0.05,
+    0.40, 0.45, 0.50, 0.55, 0.30, 0.65, 0.55, 0.35, 0.05, 0.10,
+    0.05, 0.05, 0.05, 0.05, 0.05, 0.40, 0.45, 0.35, 0.50, 0.45,
+    0.50, 0.50, 0.40, 0.55, 0.50, 0.45, 0.40, 0.45, 0.70, 0.65,
+    0.70, 0.65, 0.70, 0.65, 0.60, 0.85, 0.75, 0.80, 0.40, 0.20,
+    0.75, 0.60,
+    # Anthropogenic weights
+    0.00,  # L11.1 Ræktarlönd
+    0.10,  # L11.2 Túngrónir reitir (some birch along edges)
+    0.00,  # L12.1 Vegsvæði
+    0.00,  # L12.2 Þéttbýli / byggð
+    0.00,  # L12.3 Flugvellir / iðnaðarsvæði
+    0.00,  # L12.4 Námur
+    0.00,  # L12.5 Vökvafylltar lón (water)
+    0.00,  # L12.6 Skógræktarsvæði (birch reforestation possible)
+    0.00,
+    0.00,
+    0.00,
+    0.00,
+    0.00
+  )
+)
+
+# 1. Load raster
+habitats <- rast("data/natt_vg25r_3_utg_epsg_3057/NI_VG25r_3.utg/ni_vg25r_3utg.tif")
+
+# 2. Read attribute table
+rat <- as.data.frame(read.dbf("data/natt_vg25r_3_utg_epsg_3057/NI_VG25r_3.utg/ni_vg25r_3utg.tif.vat.dbf"))
+
+# 3. Join with birch weights
+rat_joined <- rat %>%
+  dplyr::rename(Vistgerd = dbf.Vistgerð, Value = dbf.Value) %>%
+  left_join(birch_weights, by = "Vistgerd")
+
+# 4. Check join result
+head(rat_joined[c("Value.x", "Vistgerd", "Birch_weight")])
+
+# 5. Prepare lookup matrix for classify()
+lookup_mat <- as.matrix(rat_joined[, c("Value.x", "Birch_weight")])
+
+# 6. Map birch weights onto raster
+habitat_birch_suitability <- classify(habitats, rcl = lookup_mat)
+
+```
+
+```{r include = F}
+
+# Each 1 km cell is 1000 / 10 = 100 cells of 10 m
+fact <- 100  # aggregation factor
+
+habitat_birch_suitability_1km <- aggregate(
+  habitat_birch_suitability,
+  fact = fact,
+  fun = mean,
+  na.rm = T
+)
+
+# --- Generate pseudo-absences across Iceland ---
+
+set.seed(456)
+
+# 1. Raster to data.frame
+r_df <- as.data.frame(habitat_birch_suitability_1km, xy = TRUE, na.rm = TRUE)
+names(r_df) <- c("x", "y", "suitability")
+
+# 2. Remove zero values (optional, or replace with small epsilon)
+r_df <- r_df[r_df$suitability > 0, ]
+
+# 3. Weighted sampling of rows
+sample_idx <- sample(
+  1:nrow(r_df),
+  size = 5000,
+  replace = TRUE,            # TRUE allows sampling more points than unique cells
+  prob = r_df$suitability    # probability proportional to raster value
+)
+
+sampled_points_df <- r_df[sample_idx, c("x", "y")]
+
+# 4. Convert to SpatVector
+pseudo_absences <- vect(sampled_points_df, geom = c("x", "y"), crs = crs(habitat_birch_suitability_1km))
+
+plot(habitat_birch_suitability_1km)
+points(pseudo_absences, col = "red", pch = 16, cex = 0.6)
+
+pseudo_absences <- project(pseudo_absences, iceland_crs)
+
+```
+
+```{r include = F}
+
+
+pseudo_absences$presence <- 0  # mark pseudo-absences
+presence_locations$presence <- 1
+
+# Keep only presence column for combining
+presence_locations <- presence_locations["presence"]
+pseudo_absences   <- pseudo_absences["presence"]
+
+# --- 6) Combine presence + pseudo-absence points ---
+pa_data <- rbind(presence_locations, pseudo_absences)
+
+
+```
+
+### Regional-scale SDM
+
+load in the soil
+
+
+```{r include = F}
+# Reading in bioclim data for a cropped and masked Iceland
+
+data_folder <- "data/wc2.1_30s_bio/"
+files <- list.files(
+  data_folder,
+  pattern = "^wc2\\.1_30s_bio_.*\\.tif$", 
+  full.names = TRUE
+)
+
+bio_stack <- rast(files)
+
+iceland_shape <- vect("data/Iceland_shapefile/is_1km.shp")
+iceland_shape <- project(iceland_shape, crs(bio_stack))
+bio_iceland <- crop(bio_stack, iceland_shape)
+bio_regional_crop <- mask(bio_iceland, iceland_shape)
+
+```
+
+```{r include = F}
+# Reading in DEM to crop and mask and calculate slope
+
+dem_regional <-  rast('data/wc2.1_30s_elev/wc2.1_30s_elev.tif')
+dem_regional_crop <- crop(dem_regional, iceland_shape)
+dem_regional_crop <- mask(dem_regional_crop, iceland_shape)
+slope_regional <- terrain(dem_regional_crop, v = "slope", unit = "degrees")
+
+```
+
+```{r include = F}
+# Topographic position index of 5 x 5 moving window using mean
+
+w <- matrix(1, nrow = 5, ncol = 5)
+local_mean <- focal(dem_regional_crop, w = w, fun = mean, na.rm = TRUE)
+tpi <- dem_regional_crop - local_mean
+names(tpi) <- "tpi"
+
+```
+
+
+```{r include = F}
+# compile raster stack for modelling
+
+soil_stack <- rast("data/soils/iceland_soilgrid_0-5cm.tif")
+soil_stack <- project(soil_stack, bio_stack)
+soil_stack <- crop(soil_stack, iceland_shape)
+
+```
+
+```{r include = F}
+# compile raster stack for modelling
+
+env_stack <- c(bio_regional_crop, slope_regional, tpi, soil_stack)
+
+```
+
+```{r include = F}
+# Assigning presence and absence
+
+pa_climate <- terra::extract(env_stack, pa_data, xy = TRUE)
+pa_climate$presence <- pa_data$presence
+pa_climate <- na.omit(pa_climate)
+pa_climate$presence <- factor(pa_climate$presence, levels = c(0,1))
+pa_climate <- pa_climate %>% dplyr::select(-c(ID,x,y))
+
+
+```
+
+```{r include = F}
+# fitting the model
+
+set.seed(123)
+rf_broad_model <- randomForest(
+presence ~ .,
+data = pa_climate,
+ntree = 500,
+mtry = floor(sqrt(ncol(pa_climate))),  # fewer variables per split
+nodesize = 10,  
+importance = TRUE
+)
+
+importance(rf_broad_model)
+varImpPlot(rf_broad_model, type = 1)
+```
+
+```{r eval = F}
+
+library(embarcadero)
+
+# --- 1. Prepare training data ---
+y <- as.numeric(as.character(pa_climate$presence))
+X <- pa_climate %>% select(-presence)
+
+# --- 2. Fit BART model ---
+set.seed(123)
+bart_fit <- bart(
+  x.train = X,
+  y.train = y,
+  keeptrees = TRUE,
+  ndpost  = 3   # posterior draws
+)
+
+# --- 3. Evaluate model performance ---
+summary(bart_fit)
+varimp(bart_fit)
+
+# --- 4. Prepare raster stack for prediction ---
+env_raster <- raster::stack(env_stack)
+
+# --- 5. Get full posterior predictions (not just quantiles) ---
+# predict.bart gives a matrix of predictions: [n_cells, ndpost]
+pred_matrix <- predict(bart_fit, newdata = env_raster)
+
+# --- 6. Compute posterior summaries ---
+posterior_mean <- apply(pred_matrix, 1, mean, na.rm = TRUE)
+posterior_sd   <- apply(pred_matrix, 1, sd, na.rm = TRUE)
+
+# --- 7. Map back to rasters ---
+mean_raster <- env_raster[[1]]
+sd_raster   <- env_raster[[1]]
+
+mean_raster <- setValues(mean_raster, posterior_mean)
+sd_raster   <- setValues(sd_raster, posterior_sd)
+
+# --- 8. Convert to terra for plotting (optional) ---
+mean_raster_t <- rast(mean_raster)
+sd_raster_t   <- rast(sd_raster)
+
+# --- 9. Plot posterior summaries ---
+plot(mean_raster_t, main = "Posterior Mean Probability (BART)")
+plot(sd_raster_t, main = "Posterior SD (Uncertainty)")
+
+
+
+```
+
+
+### Cross validation
+
+Spatial cross-validation (CV) is a method used to evaluate species distribution models while accounting for spatial autocorrelation in ecological data. Traditional random CV can overestimate model performance because nearby locations often have similar environmental conditions, causing the training and test data to be spatially dependent. In spatial CV, the study area is divided into spatial blocks, and each block is systematically held out as a test set while the model is trained on the remaining blocks. This approach ensures that training and testing data are spatially separated, providing a more realistic assessment of how well the model can predict species presence or absence in unsampled areas. By repeating this process across multiple blocks or folds, researchers can obtain robust performance metrics such as accuracy, sensitivity, specificity, and AUC, giving a more reliable estimate of model generalization in space.
+
+```{r}
+
+# 1) Convert presence/absence points to sf and project to raster CRS
+pa_sf <- st_as_sf(pa_data)  
+pa_sf <- st_transform(pa_sf, st_crs(env_stack))
+
+# 2) Spatial blocking
+set.seed(123)
+sb <- spatialBlock(
+  speciesData = pa_sf,
+  species = "presence",
+  rasterLayer = env_stack[[1]],  # defines extent
+  theRange = 50000,              # block size in meters
+  k = 5,                         # number of folds
+  selection = "random",
+  iteration = 100,
+  showBlocks = TRUE
+)
+pa_sf$foldID <- sb$foldID
+
+# 3) Split into training/testing for fold 1
+train <- pa_sf[pa_sf$foldID != 1, ]
+test  <- pa_sf[pa_sf$foldID == 1, ]
+
+# 4) Convert sf to SpatVector for terra::extract
+train_vect <- vect(train)
+test_vect  <- vect(test)
+
+# 5) Extract environmental variables and bind presence column
+train_env <- terra::extract(env_stack, train_vect, bind = TRUE)
+test_env  <- terra::extract(env_stack, test_vect, bind = TRUE)
+
+# 6) Convert to data.frame for dplyr manipulation
+train_env <- as.data.frame(train_env)
+test_env  <- as.data.frame(test_env)
+
+# 7) Remove ID column if it exists, then remove rows with NA
+cols_to_remove <- intersect(c("ID"), colnames(train_env))
+if(length(cols_to_remove) > 0) train_env <- train_env %>% select(-all_of(cols_to_remove))
+train_env <- na.omit(train_env)
+
+cols_to_remove <- intersect(c("ID"), colnames(test_env))
+if(length(cols_to_remove) > 0) test_env <- test_env %>% select(-all_of(cols_to_remove))
+test_env <- na.omit(test_env)
+
+# 8) Convert presence to factor
+train_env$presence <- factor(train_env$presence, levels = c(0,1))
+test_env$presence  <- factor(test_env$presence, levels = c(0,1))
+
+# 9) Quick NA check
+colSums(is.na(train_env))  # should be all 0
+colSums(is.na(test_env))   # should be all 0
+
+# 10) Fit Random Forest
+rf_model <- randomForest(
+  presence ~ .,
+  data = pa_climate,
+  ntree = 500,
+  mtry = floor(sqrt(ncol(pa_climate))),  # fewer variables per split
+  nodesize = 10,  
+  importance = TRUE)
+
+# 11) Predict on test set
+pred <- predict(rf_model, newdata = test_env, type = "response")
+
+# 12) Evaluate performance
+confusionMatrix(pred, test_env$presence)
+
+```
+
+### Prediction
+
+```{r}
+# predicting over Iceland
+
+broad_scale_rf_prob <- terra::predict(
+  env_stack,             # climate predictors raster stack
+  rf_broad_model,                # your trained RF model
+  type = "prob",
+  index = 2, # probability of presence class
+  filename = "data/broad_scale_rf_prob.tif",  # write output directly to file
+  overwrite = TRUE)
+
+```
+
+### smooths edges
+
+Since we are combining broad-scale and local-scale models, we need to smooth the edges of the broad-scale model so that when we clip to the AOI there are no jagged edges. 
+
+```{r}
+
+# Broadscale model (already loaded)
+broad_prob <- broad_scale_rf_prob
+
+# Reproject to a metric CRS (EPSG:8088 – Iceland Lambert 2016)
+broad_proj <- terra::project(broad_prob, "EPSG:8088")
+
+# Fill small NA gaps using a local mean
+broad_filled <- terra::focal(
+  broad_proj,
+  w = 3,
+  fun = function(x, ...) {
+    if (is.na(x[5])) mean(x, na.rm = TRUE) else x[5]
+  },
+  na.policy = "omit",
+  fillvalue = NA
+)
+
+# Define a 5 km smoothing radius
+radius_m <- 5000
+w <- terra::focalMat(broad_filled, d = radius_m, type = "circle")
+
+# Apply smoothing (mean filter)
+broad_smooth <- terra::focal(broad_filled, w = w, fun = mean, na.rm = TRUE)
+
+# Reproject smoothed raster back to WGS84 (or original CRS of broad_prob)
+broad_smooth_aligned <- terra::project(broad_smooth, crs(broad_prob), method = "bilinear")
+
+# Resample smoothed raster to exactly match broad_prob (extent & resolution)
+broad_smooth_aligned <- terra::resample(broad_smooth_aligned, broad_prob, method = "bilinear")
+
+# Cover edges: keep broad_prob, fill NAs with smoothed raster
+broad_edges_added <- terra::cover(broad_prob, broad_smooth_aligned)
+
+
+```
+
+
+```{r}
+dem <- rast("data/IslandsDEMv1.0_10x10m_isn2016_zmasl.tif")
+
+broad_scale_rf_prob_10m <- terra::project(broad_edges_added, dem)
+
+```
+
+
+```{r}
+
+plot(broad_scale_rf_prob_10m)
+
+```
+
+```{r}
+# ---- Predict probability of presence at each point used in training ----
+pa_climate$pred_prob <- predict(rf_broad_model, type = "prob")[, 2]  # column 2 = presence class prob
+
+# ---- Compute residuals ----
+# presence is coded as 0 (pseudo-absence) or 1 (presence)
+# residual = observed - predicted
+pa_climate$residual <- as.numeric(as.character(pa_climate$presence)) - pa_climate$pred_prob
+
+```
+
+```{r}
+
+# Convert residuals to SpatVector with coordinates
+resid_vect <- pa_data  # same geometry as presence/pseudoabsence points
+resid_vect$residual <- pa_climate$residual
+
+
+```
+
+## GEE 
+
+This code chunk outputs the points needed for GEE.
+
+
+```{r eval = F}
+# export points for future work with GEE
+
+sampled_forest_cells <- project(pa_data[, FALSE], "EPSG:4326")
+writeVector(sampled_forest_cells, "data/GEE/SDM_pa_points.shp", overwrite = TRUE)
+
+```
+
+## Investigating spatial-autocorrelation of broad-scale RF residuals
+
+Visualizing the residuals. Then creating a spatial weights matrix based on the 4 nearest neighbors and computing Moran’s I to test for spatial autocorrelation in the residuals.
+
+```{r}
+
+resid_sf <- sf::st_as_sf(resid_vect)
+st_crs(resid_sf)
+resid_vect_wgs84 <- st_transform(resid_sf, crs = 4326)
+
+pal <- colorNumeric(
+  palette = "RdBu",  # red-blue diverging
+  domain = resid_vect_wgs84$residual,
+  reverse = TRUE
+)
+
+leaflet(resid_vect_wgs84) %>%
+  addTiles(group = "OSM") %>%
+  addCircleMarkers(
+    radius = 5,
+    color = ~pal(residual),
+    stroke = FALSE,
+    fillOpacity = 0.8,
+    popup = ~paste0(
+      "<b>Residual:</b> ", round(residual, 3)
+    )
+  ) %>%
+  addLegend(
+    "bottomright",
+    pal = pal,
+    values = ~residual,
+    title = "Residual (Observed - Predicted)",
+    labFormat = labelFormat(digits = 2)
+  )
+
+
+```
+
+```{r}
+
+# 1. Create neighbors list (e.g., k nearest neighbors)
+coords <- st_coordinates(resid_sf)
+k <- 4  # number of neighbors
+nb <- knn2nb(knearneigh(coords, k=k))
+
+# 2. Create spatial weights
+lw <- nb2listw(nb, style="W", zero.policy=TRUE)
+
+# 3. Compute Moran's I
+moran_test <- moran.test(resid_sf$residual, lw, zero.policy=TRUE)
+moran_test
+
+```
+
+
+
+
+### Fine-scale SDM
+
+## Construct fine-scale predictors
+
+## Elevation and slope
+
+```{r}
+
+# Compute slope and aspect
+slope <- terrain(dem, v = "slope", unit = "radians")
+
+```
+
+```{r}
+
+dem_100m <- aggregate(dem, fact = 10, fun = mean)  # 100 m resolution
+writeRaster(dem_100m, filename = "data/saga_output/DEM_100m.tif", overwrite = TRUE)
+
+```
+
+## Mean growing season and peak summer radiation 
+
+```{r}
+
+# set environment (adjust path if needed)
+env <- rsaga.env(path = "C:/Users/jay.philip/Desktop/utilities/saga-9.10.0_x64/saga-9.10.0_x64")   # auto-detects SAGA; or rsaga.env(path = "C:/path/to/saga")
+outdir <- "data/saga_output/"
+
+# -----------------------
+# 3. Define representative mid-month days
+# -----------------------
+# List of months and representative day of month
+mid_month_days <- data.frame(
+  month = 5:9,         # May–September
+  day   = c(15, 15, 15, 15, 15)
+)
+
+# Store paths to Total radiation rasters
+total_rasters <- c()
+jun_jul_rasters <- c()
+
+# -----------------------
+# 4. Loop over each mid-month day
+# -----------------------
+for(i in 1:nrow(mid_month_days)) {
+  m <- mid_month_days$month[i]
+  d <- mid_month_days$day[i]
+  
+  out_total <- file.path(outdir, paste0("Total_", sprintf("%02d", m), ".tif"))
+  out_direct <- file.path(outdir, paste0("Direct_", sprintf("%02d", m), ".tif"))
+  out_diffuse <- file.path(outdir, paste0("Diffuse_", sprintf("%02d", m), ".tif"))
+  out_duration <- file.path(outdir, paste0("Duration_", sprintf("%02d", m), ".tif"))
+  
+  cat("Computing solar radiation for month", m, "day", d, "\n")
+  
+  rsaga.pisr2(
+    in.dem         = "data/saga_output/DEM_100m.tif",
+    out.total.grid = out_total,
+    out.direct.grid = out_direct,
+    out.diffuse.grid = out_diffuse,
+    out.duration    = out_duration,
+    latitude       = 65,               # Iceland
+    unit           = "kWh/m2",
+    time.range     = c(0, 24),
+    time.step      = 1,                # hourly integration
+    start.date     = list(day = d, month = m, year = 2024),
+    day.step       = 1,
+    env            = env
+  )
+  
+  # Collect raster paths for later averaging
+  total_rasters <- c(total_rasters, out_total)
+  if(m %in% 6:7) {  # June–July for peak summer
+    jun_jul_rasters <- c(jun_jul_rasters, out_total)
+  }
+}
+
+# -----------------------
+# 5. Aggregate Total radiation rasters
+# -----------------------
+
+# Stack all Total rasters into a single SpatRaster for growing season
+rast_stack <- do.call(c, lapply(total_rasters, rast))
+growing_season_mean <- app(rast_stack, mean, na.rm = TRUE)
+writeRaster(growing_season_mean, file.path(outdir, "Mean_GrowingSeason.tif"), overwrite = TRUE)
+
+# Stack June–July rasters for peak summer
+jun_jul_stack <- do.call(c, lapply(jun_jul_rasters, rast))
+peak_summer_mean <- app(jun_jul_stack, mean, na.rm = TRUE)
+writeRaster(peak_summer_mean, file.path(outdir, "Mean_JuneJuly.tif"), overwrite = TRUE)
+
+cat("Finished computing growing season and peak summer radiation rasters.\n")
+
+
+```
+
+```{r}
+
+# -----------------------
+# 1. Read the averaged rasters
+# -----------------------
+growing_season <- rast(file.path(outdir, "Mean_GrowingSeason.tif"))
+peak_summer   <- rast(file.path(outdir, "Mean_JuneJuly.tif"))
+
+# -----------------------
+# 2. Plot side by side
+# -----------------------
+par(mfrow = c(1, 2))  # two plots in one row
+
+plot(growing_season, main = "Mean Growing Season Radiation\n(May–Sep, kWh/m²/day)")
+plot(peak_summer, main = "Peak Summer Radiation\n(June–July, kWh/m²/day)")
+
+par(mfrow = c(1,1))  # reset plotting layout
+
+
+```
+
+```{r}
+
+# Upscale mean rasters to 10m
+growing_season_10m <- resample(growing_season, dem, method = "bilinear")
+peak_summer_10m   <- resample(peak_summer, dem, method = "bilinear")
+
+# Write out upscaled rasters
+writeRaster(growing_season_10m, file.path(outdir, "Mean_GrowingSeason_10m.tif"), overwrite = TRUE)
+writeRaster(peak_summer_10m,   file.path(outdir, "Mean_JuneJuly_10m.tif"), overwrite = TRUE)
+
+```
+
+## Topographic wetness index
+
+```{r eval=F}
+
+# -----------------------
+# SDM Topographic Predictor Preparation
+# Computes: slope, aspect, upslope area (SCA), TWI
+# -----------------------
+
+library(RSAGA)
+library(terra)
+
+# -----------------------
+# 1. Paths and environment
+# -----------------------
+dem_path <- "data/IslandsDEMv1.0_10x10m_isn2016_zmasl.tif"
+dir.create(outdir, showWarnings = FALSE)
+
+# -----------------------
+# 2. Slope & Aspect
+# -----------------------
+slope_out  <- file.path(outdir, "Slope.sgrd")
+aspect_out <- file.path(outdir, "Aspect.sgrd")
+
+rsaga.geoprocessor(
+  lib    = "ta_morphometry",
+  module = "Slope, Aspect, Curvature",
+  param  = list(
+    ELEVATION = dem_path,
+    SLOPE     = slope_out,
+    ASPECT    = aspect_out
+  ),
+  env = env,
+  show.output.on.console = TRUE
+)
+
+# -----------------------
+# 3. Upslope Area (Specific Catchment Area)
+# -----------------------
+sca_out <- file.path(outdir, "SCA.sgrd")
+
+rsaga.geoprocessor(
+  lib    = "ta_hydrology",
+  module = "Flow Width and Specific Catchment Area",
+  param  = list(
+    DEM        = dem_path,
+    WIDTH      = NULL,        # optional
+    TCA        = NULL,        # optional
+    SCA        = sca_out,     # output specific catchment area
+    COORD_UNIT = 0,
+    METHOD     = 0
+  ),
+  env = env,
+  show.output.on.console = TRUE
+)
+
+# -----------------------
+# 4. TWI Calculation
+# -----------------------
+twi_out <- file.path(outdir, "TWI.sgrd")
+
+rsaga.geoprocessor(
+  lib    = "ta_hydrology",
+  module = "Topographic Wetness Index",
+  param  = list(
+    SLOPE  = slope_out,
+    AREA   = sca_out,   # use SCA for TWI
+    TRANS  = 0,
+    TWI    = twi_out,
+    CONV   = 1,
+    METHOD = 0
+  ),
+  env = env,
+  show.output.on.console = TRUE
+)
+
+```
+
+```{r}
+
+twi <- rast("data/saga_output/TWI.tif")
+
+```
+
+## Modelling residuals experimental
+
+```{r}
+library(terra)
+library(sf)
+library(dplyr)
+library(xgboost)
+
+# ===========================
+# 1. Raster predictors
+# ===========================
+env_stack <- c(dem, slope, peak_summer_10m, twi)
+names(env_stack) <- c("DEM", "Slope", "peak_summer", "twi")
+
+# Extract raster values at residual points
+resid_env <- terra::extract(env_stack, resid_vect, xy = TRUE)
+
+# Add residuals from resid_vect
+resid_env$residual <- resid_vect$residual
+
+# Remove incomplete rows
+resid_env <- resid_env %>% dplyr::filter(dplyr::if_all(dplyr::everything(), ~ !is.na(.)))
+
+# ===========================
+# 2. Embeddings
+# ===========================
+embeddings <- read.csv("data/GEE/satellite_embeddings_2023_10m_avg.csv") %>%
+  dplyr::rename(x = longitude, y = latitude) %>%
+  dplyr::select(-dplyr::any_of(c("FID", "system.index","year", ".geo")))
+
+# Convert to sf
+embeddings_sf <- sf::st_as_sf(embeddings, coords = c("x", "y"), crs = 4326) # assume embeddings in WGS84
+
+# Convert residuals to sf
+resid_sf <- sf::st_as_sf(resid_vect)
+
+# ===========================
+# 3. CRS alignment
+# ===========================
+# Transform embeddings to match residuals CRS
+embeddings_sf <- sf::st_transform(embeddings_sf, sf::st_crs(resid_sf))
+
+# ===========================
+# 4. Spatial join (nearest neighbor)
+# ===========================
+resid_with_embed_sf <- sf::st_join(resid_sf, embeddings_sf, join = sf::st_nearest_feature)
+
+# Drop geometry
+resid_with_embed_df <- sf::st_drop_geometry(resid_with_embed_sf)
+
+# ===========================
+# 5. Combine raster predictors + embeddings
+# ===========================
+resid_env_sf <- sf::st_as_sf(resid_env, coords = c("x", "y"), crs = sf::st_crs(resid_sf))
+
+# Join raster predictors to embeddings
+full_sf <- sf::st_join(resid_env_sf, embeddings_sf, join = sf::st_nearest_feature)
+
+# Drop geometry to get final data frame
+full_df <- sf::st_drop_geometry(full_sf)
+
+# Verify residual column exists
+if(!"residual" %in% colnames(full_df)) stop("Column 'residual' not found in full_df")
+
+# ===========================
+# 6. Prepare for XGBoost
+# ===========================
+resid_mat <- full_df %>%
+  dplyr::select(-dplyr::any_of(c("residual","ID"))) %>%
+  as.matrix()
+
+resid_target <- full_df$residual
+
+dtrain <- xgb.DMatrix(data = resid_mat, label = resid_target)
+
+# ===========================
+# 7. Train model
+# ===========================
+params <- list(
+  objective = "reg:squarederror",
+  eta = 0.1,
+  max_depth = 4,
+  subsample = 0.7,
+  colsample_bytree = 0.7
+)
+
+set.seed(123)
+xgb_fine_model_res <- xgb.train(
+  params = params,
+  data = dtrain,
+  nrounds = 500,
+  verbose = 1
+)
+
+# ===========================
+# 8. Feature importance
+# ===========================
+importance_matrix <- xgb.importance(model = xgb_fine_model_res)
+xgb.plot.importance(importance_matrix)
+
+
+```
+
+## Export AOI for GEE
+
+```{r}
+
+# Load regions
+regions <- vect("data/boundaries/is_50v_mork_epsg_8088.gpkg/is_50v_mork_epsg_8088.gpkg", 
+                layer = "mork_logregluumdaemi")
+
+# Reproject to DEM CRS
+regions_proj <- project(regions, crs(dem))
+
+# Subset the region you want
+rykb_subset <- regions_proj[regions_proj$objectid == 2, ]
+
+# Convert to sf polygon (for GEE)
+rykb_sf <- st_as_sf(rykb_subset)
+
+# Save as GeoJSON for GEE upload
+#st_write(rykb_sf, "data/GEE/roi_westfjords_subset.shp", delete_dsn = TRUE, overwrite = T)
+
+```
+
+## Read in Embeddings
+
+```{r}
+
+library(terra)
+
+# Set directory
+raster_dir <- "C:/Users/jay.philip/Desktop/preferential planter/data/GEE/reyk_penisula_tiles"
+
+# List all TIFF files
+tif_files <- list.files(raster_dir, pattern = "\\.tif$", full.names = TRUE)
+
+# Read all rasters into a list
+rasters_list <- lapply(tif_files, rast)
+
+# Merge tiles together (works even if extents don't match)
+merged_raster <- do.call(merge, rasters_list)
+
+# Check merged raster
+print(merged_raster)
+plot(merged_raster[[30]])  # plot first layer as example
+
+```
+
+## Create fine-scale topographic-embeddings rasterstack
+
+```{r}
+
+env_stack <- crop(env_stack, rykb_subset)
+env_stack <- mask(env_stack, rykb_subset)
+
+# 1️⃣ Align CRS of merged_raster to env_stack
+merged_raster_proj <- project(merged_raster, crs(env_stack))
+
+# 2️⃣ Resample merged_raster to match env_stack resolution and extent
+merged_raster_resampled <- resample(merged_raster_proj, env_stack, method = "bilinear") 
+# "bilinear" is good for continuous data; use "near" for categorical
+
+# 3️⃣ Crop to exact env_stack extent (optional, just to be safe)
+merged_raster_crop <- crop(merged_raster_resampled, ext(env_stack))
+
+# 4️⃣ Stack with existing env_stack
+full_stack <- c(env_stack, merged_raster_crop)
+
+# 5️⃣ Verify
+names(full_stack)
+plot(full_stack[[1]])  # Check first layer
+
+
+```
+
+## Predict over AOI
+
+```{r}
+library(terra)
+
+# Extract predictor values from raster for Reykjanes
+pred_mat <- terra::values(full_stack, mat = TRUE)  # matrix of raster values
+
+# Remove rows with NA (XGBoost cannot handle NAs)
+na_rows <- apply(pred_mat, 1, function(x) any(is.na(x)))
+pred_mat_clean <- pred_mat[!na_rows, , drop = FALSE]
+
+# Keep track of which cells are valid
+valid_cells <- which(!na_rows)
+
+# Predict residuals
+resid_pred <- predict(
+  xgb_fine_model_res,
+  newdata = pred_mat_clean
+)
+
+# Create an empty raster to store predictions
+resid_raster <- full_stack[[1]]  # template
+terra::values(resid_raster) <- NA
+terra::values(resid_raster)[valid_cells] <- resid_pred
+
+# Plot
+plot(resid_raster, main = "Fine-scale Residual Prediction (Gradient Boosting)")
+terra::writeRaster(resid_raster, "data/residual_plot_embedded.tif", overwrite = TRUE)
+
+```
+
+## Resample broad-scale model
+
+```{r}
+
+# Ensure CRS match
+broad_scale_rf_prob_10m <- project(broad_scale_rf_prob_10m, crs(rykb_subset))
+
+# Crop to the Reykjanes bounding box
+broad_crop <- crop(broad_scale_rf_prob_10m, rykb_subset)
+broad_crop <- mask(broad_crop, rykb_subset)
+
+plot(broad_crop, main = "Broad-scale probability (Reykjanes subset)")
+
+```
+
+```{r}
+
+writeRaster(broad_crop, "data/broad_scale_model_cropped.tif")
+
+```
+
+
+## Combine residuals to broad-scale probabilities and construct final predictions
+
+```{r}
+
+# Align grid, extent, and resolution
+fine_resid_pred <- project(resid_raster, crs(broad_crop))
+fine_resid_pred <- resample(resid_raster, broad_crop, method = "bilinear")
+
+# Combine
+multiscale_reykjanes <- broad_crop + fine_resid_pred
+
+# Clamp to valid probability range
+multiscale_reykjanes <- clamp(multiscale_reykjanes, 0, 1)
+
+# Plot
+plot(multiscale_reykjanes, main = "Multiscale Betula SDM (Reykjanes, 10 m)")
+
+# Save output
+writeRaster(multiscale_reykjanes,
+            "data/multiscale_betula_reykjanes_10m_embeddings.tif",
+            overwrite = TRUE)
+
+```
+
+```{r}
+
+multiscale_reykjanes_growth_threshold <- ifel(multiscale_reykjanes < 0.4, 0, multiscale_reykjanes)
+
+```
+
+
+### Social factors 
+
+The following social factors are used in the suitability mapping:
+- distance from roads
+- distance from towns
+
+## Distance from road
+
+```{r}
+
+# Define the inverse exponential function
+preference_function <- function(x, k = 0.01) {
+  exp(-k * x)
+}
+
+# Example: distances from 0 to 1000 meters
+distance <- seq(0, 5000, by = 10)
+
+# Calculate preference scores
+preference <- preference_function(distance, k = 0.0005)
+
+# Plot the preference curve
+plot(distance, preference, type = "l", col = "forestgreen", lwd = 2,
+     xlab = "Distance to Road (m)", ylab = "Preference",
+     main = "Inverse Exponential Preference Function")
+grid()
+
+
+```
+
+```{r}
+
+# 1. Load base DEM (this defines resolution, extent, and CRS)
+dem_crop <- crop(dem, rykb_subset)
+
+# 2. Load road vector
+roads <- vect("data/roads/is_50v_samgongur_epsg_8088.gpkg/is_50v_samgongur_epsg_8088.gpkg", layer = "samgongur_linur")
+roads_proj <- project(roads, crs(dem))
+roads_crop <- crop(roads_proj, rykb_subset)
+
+
+
+# 3. Rasterize roads to DEM grid (use disk-based output)
+r_roads <- terra::rasterize(roads_crop, 
+                     dem_crop, field = 1, 
+                     background = 0,
+                     filename = "data/roads/road_distance_rast_reyjkbaer.tif",
+                     overwrite = T)
+
+
+whitebox::wbt_euclidean_distance(
+  input = "data/roads/road_distance_rast_reyjkbaer.tif",
+  output = "data/roads/road_distance_whitebox.tif"
+)
+
+
+r_dist <- rast("data/roads/road_distance_whitebox.tif")
+
+# 5. Apply inverse exponential decay function (disk processing)
+k <- 0.0005  # adjust decay constant as needed
+
+# Define a function to apply per chunk
+pref_fun <- function(x) {
+  exp(-k * x)
+}
+
+# Apply function and write directly to disk
+m <- app(r_dist, fun = pref_fun, 
+         filename = "data/roads/road_preference_10m.tif", overwrite = TRUE)
+
+```
+
+
+```{r}
+
+road_dist <- rast("data/roads/road_preference_10m.tif")
+
+
+```
+
+## Population-weighted Proximity Preference
+
+We model afforestation preference as an exponentially decaying function of distance from towns, weighted by population:
+
+The preference at a location $x$ is calculated as: 
+$P(x) = \sum_{i=1}^{n} w_i \cdot e^{-\lambda \cdot d_i(x)}$
+Where:
+
+- \( P(x) \): preference at location \( x \)
+- \( w_i \): population weight of town \( i \) (e.g. number of inhabitants)
+- \( \lambda \): decay rate parameter (controls how quickly preference drops with distance)
+- \( d_i(x) \): Euclidean distance from location \( x \) to town \( i \)
+- \( n \): total number of towns
+
+This results in higher preference values near larger towns and lower values further away.
+
+
+```{r}
+# Parameters
+
+lambda <- 0.001
+distance <- seq(0, 10000, length.out = 500)  # distance in meters
+pop_vals <- c(1000, 2000, 4000)  # example populations
+colors <- c("darkgreen", "dodgerblue", "firebrick")
+
+# Plot setup
+
+plot(distance, rep(0, length(distance)), type = "n",
+ylim = c(0, max(pop_vals)),
+xlab = "Distance from town (m)",
+ylab = "Preference",
+main = expression(paste("Preference = Population × ", e^{-lambda %.% distance})))
+
+# Add curves for each population
+
+for (i in seq_along(pop_vals)) {
+pref <- pop_vals[i] * exp(-lambda * distance)
+lines(distance, pref, col = colors[i], lwd = 2)
+}
+
+# Add legend
+
+legend("topright", legend = paste("Population =", pop_vals),
+col = colors, lwd = 2, bty = "n")
+
+```
+
+```{r eval = FALSE}
+
+# --- 1. Load base raster and towns ---
+dem <- rast("data/IslandsDEMv1.0_10x10m_isn2016_zmasl.tif")
+dem_lowres <- aggregate(dem, fact = 10, fun = mean)  # Lower resolution = less memory
+
+towns <- vect("data/towns/roads.shp")
+towns <- project(towns, crs(dem_lowres))
+
+# Extract population column
+pop <- towns$ibuarfj_24
+pop[is.na(pop)] <- 0
+
+# --- 2. Create empty raster to accumulate preference ---
+pref_total <- rast(dem_lowres)
+values(pref_total) <- 0  # initialize with zeros
+
+lambda <- 0.001
+
+# --- 3. Loop through each town, add weighted preference to total ---
+for (i in 1:nrow(towns)) {
+  cat("Processing town", i, "with population", pop[i], "\n")
+  
+  # Skip towns with 0 population
+  if (pop[i] == 0) next
+  
+  # Rasterize current town
+  town_r <- rasterize(towns[i, ], dem_lowres, field = 1)
+  
+  # Compute distance
+  dist_r <- distance(town_r)
+  
+  # Weighted preference
+  pref <- pop[i] * exp(-lambda * dist_r)
+  
+  # Add to total
+  pref_total <- pref_total + pref
+  
+  # Clean up to save memory
+  rm(pref, dist_r, town_r)
+  gc()
+}
+
+# resample to DEM and then mask towns as zero
+pref_total_resampled <- terra::resample(pref_total, dem, method = "bilinear")
+town_mask <- rasterize(towns, dem, field=1, background=NA)
+pref_total_resampled_masked <- ifel(!is.na(town_mask), 0, pref_total_resampled)
+
+```
+
+```{r eval = FALSE}
+
+writeRaster(
+  pref_total_resampled_masked,
+  filename = "data/pop_weighted_proxity_town.tif",
+  overwrite = TRUE
+)
+
+```
+
+```{r}
+
+pop_weighted_proxity_town <- rast("data/pop_weighted_proxity_town.tif")
+pop_weighted_proxity_town_crop <- crop(pop_weighted_proxity_town, rykb_subset)
+
+```
+
+### Probablistic MCDA
+
+```{r}
+normalize_minmax <- function(r) {
+  r_min <- global(r, fun = "min", na.rm = TRUE)[1,1]
+  r_max <- global(r, fun = "max", na.rm = TRUE)[1,1]
+  
+  (r - r_min) / (r_max - r_min)
+}
+
+pop_weighted_norm <- normalize_minmax(pop_weighted_proxity_town_crop)
+
+mcda_stack <- c(multiscale_reykjanes, road_dist, pop_weighted_norm) 
+
+```
+
+```{r}
+
+# ---- 1. Define weight ranges ----
+ranges <- list(
+  eco       = c(0.4, 0.6),
+  road_prox = c(0.2, 0.3),
+  town_prox = c(0.2, 0.3)
+)
+
+# ---- 2. Generate valid weight sets that sum to 1 ----
+sample_weight_combination <- function(ranges, n = 100) {
+  results <- tibble()
+  
+  while(nrow(results) < n) {
+    eco       <- runif(1, ranges$eco[1], ranges$eco[2])
+    road_prox <- runif(1, ranges$road_prox[1], ranges$road_prox[2])
+    town_prox <- runif(1, ranges$town_prox[1], ranges$town_prox[2])
+    
+    total <- eco + road_prox + town_prox
+    
+    if (abs(total - 1) < 0.01) {
+      weights <- c(eco, road_prox, town_prox) / total
+      results <- bind_rows(results, tibble(
+        eco = weights[1],
+        road_prox = weights[2],
+        town_prox = weights[3]
+      ))
+    }
+  }
+  return(results)
+}
+
+set.seed(123)
+weight_scenarios <- sample_weight_combination(ranges, n = 50)
+
+# ---- 3. Loop over weight scenarios with progress bar ----
+
+# Create progress bar
+pb <- txtProgressBar(min = 0, max = nrow(weight_scenarios), style = 3)
+
+mcda_list <- list()
+
+for (i in 1:nrow(weight_scenarios)) {
+  weights <- as.numeric(weight_scenarios[i, ])
+  
+  mcda_result <- app(mcda_stack, fun = function(x) {
+    sum(x * weights)
+  })
+  
+  names(mcda_result) <- paste0("MCDA_", i)
+  mcda_list[[i]] <- mcda_result
+  
+  setTxtProgressBar(pb, i)  # update progress bar
+}
+
+close(pb)  # close the bar when done
+
+# ---- 4. Stack results ----
+mcda_scenarios_stack <- rast(mcda_list)
+
+```
+
+```{r}
+# Assuming mcda_scenarios_stack is a SpatRaster
+# Cell-wise mean
+mean_raster <- app(mcda_scenarios_stack, fun = mean, na.rm = TRUE)
+
+# Cell-wise standard deviation
+sd_raster <- app(mcda_scenarios_stack, fun = sd, na.rm = TRUE)
+
+```
+
+```{r}
+
+writeRaster(
+  mean_raster,
+  filename = "data/mean_suitability_map2.tif",
+  overwrite = TRUE
+)
+
+
+```

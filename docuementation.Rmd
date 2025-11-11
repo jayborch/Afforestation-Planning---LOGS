@@ -1,0 +1,446 @@
+---
+title: "Afforestation Planning and Suitability Assessment in Iceland"
+subtitle: "Version.1.0"
+author: "J.Borchard"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+bibliography: references.bib
+
+---
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r include=F}
+library(terra)
+library(terra)
+library(leaflet)
+library(htmltools)
+library(viridis)
+
+```
+
+## Introduction
+
+The goal of this project is to develop a robust and transparent framework for assessing afforestation suitability in Iceland. Afforestation plays a key role in climate adaptation, land restoration, and biodiversity enhancement, but its success depends on finding locations where environmental conditions, social priorities, and policy goals align. This project aims to identify such areas through an integrated, data-driven modern approach that combines ecological modelling, remote sensing, and spatial decision analysis.
+
+The workflow begins with a broad-scale ecological assessment that identifies general patterns of forest suitability across Iceland. This first stage captures large-scale influences such as climate and soil, providing a foundation for understanding where afforestation is biophysically feasible. A second, finer-scale model then refines these predictions using high-resolution satellite imagery and terrain data, capturing local variations in topography, microclimate, and land surface characteristics. Together, these models provide a multi-scale understanding of where trees are most likely to establish and thrive.
+
+Building on these ecological layers, the analysis incorporates social and infrastructural factors such as accessibility and proximity to population centres. These elements ensure that ecologically suitable areas are also practical for implementation, management, and community engagement. The inclusion of such human dimensions reflects the reality that successful afforestation must balance environmental potential with social and logistical feasibility.
+
+Finally, the project applies a probabilistic Multi-Criteria Decision Analysis (MCDA)(suitability ananlysis tool in ESRI) to integrate all dimensions of suitability—ecological, social, and infrastructural—into a unified framework. Unlike traditional MCDA approaches that rely on fixed weights, this probabilistic method samples from plausible weight ranges to represent uncertainty in the weighting process. This produces a spectrum of possible outcomes rather than a single deterministic map, supporting more flexible, risk-aware planning.
+
+Overall, this framework provides a transparent and scientifically grounded foundation for afforestation planning in Iceland. By linking large-scale ecological modelling with fine-scale environmental data and social considerations, it enables policymakers and land managers to identify where afforestation can deliver the greatest ecological and societal benefits.
+
+-----------------------------------------------------------------------------------------------------------------
+
+## Modelling workflow (Miro Board)
+
+
+<iframe width="768" height="432" 
+        src="https://miro.com/app/live-embed/uXjVJ0UuXbM=/?embedMode=view_only_without_ui&moveToViewport=-4073,-1714,9780,4855&embedId=570735568404"
+        frameborder="0"
+        scrolling="no"
+        allow="fullscreen; clipboard-read; clipboard-write"
+        allowfullscreen>
+</iframe>
+
+
+```{r echo=FALSE, eval= F}
+
+library(htmltools)
+
+HTML('
+<div id="zoom-container" style="width:100%; height:600px; border:1px solid #ccc; overflow:hidden;">
+  <img id="zoom-image" src="Afforestation suitability analysis pipeline.png" style="width:2000px; height:auto; cursor:grab;">
+</div>
+
+<!-- Include Panzoom library -->
+<script src="https://unpkg.com/@panzoom/panzoom/dist/panzoom.min.js"></script>
+<script>
+  const element = document.getElementById("zoom-image");
+  const panzoom = Panzoom(element, {
+    maxScale: 5,
+    minScale: 0.5,
+    contain: "outside"
+  });
+  // Enable mouse wheel zoom
+  element.parentElement.addEventListener("wheel", panzoom.zoomWithWheel);
+</script>
+')
+
+```
+
+
+-----------------------------------------------------------------------------------------------------------------
+
+## Ecological suitability
+
+The ecological suitability assessment forms the foundation of the afforestation suitability analysis workflow. We employ a two-step modelling approach: an initial broad-scale assessment provides a general overview of suitable regions across Iceland, followed by a refinement stage that incorporates high-resolution environmental data (satellite and terrain) to capture local variability. This hierarchical framework ensures that both large-scale patterns and fine-scale environmental nuances are considered, resulting in more accurate and ecologically informed afforestation planning.
+
+<div style="text-align: center;"> **Broad-scale model** → **Local-scale refinement** </div>
+
+
+### Broad-scale forest suitability mapping 
+
+**Ecological niche modelling**
+
+To identify ecologically suitable areas for afforestation in Iceland, we first employ a broad-scale species ecological niche model (ENM). ENMs are a tool used to predict where conditions are environmentally suitable to support species survival and reproduction. By relating known occurrences of a species (such as observation or survey data) to environmental variables like temperature, precipitation, soil type, or elevation, ENMs identify the combination of conditions that define the species’ *ecological niche*. These relationships can then be projected across space to estimate potential distributions—such as identifying suitable habitats in unsurveyed areas. ENMs are widely used in ecology, conservation planning, and biodiversity management to understand species–environment relationships and guide decision-making [@shilky2023application].
+
+**Species occurrence data**
+
+Here, we used the Natturulegt birkilendi and the raektad skoglendi datasets to gain an understanding about the current distributions of naturally occuring Birch and cultivated forests in Iceland. Since this data is given as polygons, 5000 points were randomly sampled from the polygons for subsequent ENM. In practice, rather than combining all species together as done here, species-specific ENMs could be used to obtain individual species preferential habitats across Iceland. Future work could focus on this. 
+
+**Environmental Predictor Variables**
+
+The ENM incorporated climate, soil, and topographic variables derived from multiple global datasets. Climate variables were obtained from [WorldClim](https://www.worldclim.org/data/bioclim.html), soil properties from [SoilGrids](https://gee-community-catalog.org/projects/isric/), and terrain attributes from the [ArcticDEM](https://gee-community-catalog.org/projects/iceland_dem/) and are shown below.
+
+```{r, echo=FALSE, message=FALSE}
+library(knitr)
+
+# Create the data frame
+vars <- data.frame(
+  Dataset = c(
+    "WorldClim", 
+    rep("SoilGrids", 11),
+    rep("ArcticDEM", 2)
+  ),
+  Description = c(
+    "All 19 bioclimatic variables (temperature and precipitation predictors)",
+    "Bulk density of the fine earth fraction",
+    "Cation Exchange Capacity of the soil",
+    "Volumetric fraction of coarse fragments (>2 mm)",
+    "Proportion of clay particles (<0.002 mm)",
+    "Total nitrogen (N)",
+    "Soil pH",
+    "Proportion of sand particles (>0.05 mm)",
+    "Proportion of silt particles (0.002–0.05 mm)",
+    "Soil organic carbon content in the fine earth fraction",
+    "Organic carbon density",
+    "Organic carbon stocks",
+    "Terrain slope",
+    "Topographic Position Index"
+  ),
+  Units = c(
+    rep("—", 1),
+    "cg/cm³",
+    "mmol(c)/kg",
+    "cm³/dm³ (vol‰)",
+    "g/kg",
+    "cg/kg",
+    "pHx10",
+    "g/kg",
+    "g/kg",
+    "dg/kg",
+    "hg/dm³",
+    "t/ha",
+    "degrees",
+    "—"
+  )
+)
+
+# Render static HTML table
+kable(
+  vars,
+  caption = "Table: Environmental predictor variables used in the ecological niche model.",
+  format = "html",
+  table.attr = "class='table table-striped table-bordered'"
+)
+
+```
+
+
+**Broad-scale Ecological suitability Predictions**
+
+ENM predictions were estimated across Iceland at a 1 km spatial resolution. These predictions highlight areas with the highest ecological suitability for afforestation, providing a foundation for more detailed, fine-scale planning. The predictions can be seen below, where 0 indicates low suitability for tree establishment and 1 indicates highly preferential. 
+
+```{r fig.height= 5, warning=F, fig.width= 8, echo=F, fig.cap=" **Figure 1.** Broad-scale predictions of ecologically preferential areas for afforestation"}
+
+# --- Load and project data ----
+skoglendi <- vect("data/forests/raektad_skoglendi_Island_07052025.shp")
+natturu_birki <- vect("data/forests/Natturulegt_birkilendi_Island_15052025.shp")
+broad_scale_model <- rast("data/broad_scale_rf_prob.tif")  # adjust path if needed
+
+skoglendi <- simplifyGeom(skoglendi, tolerance = 250)  
+natturu_birki <- simplifyGeom(natturu_birki, tolerance = 250) 
+
+# Reproject everything to WGS84
+skoglendi_wgs84 <- project(skoglendi, "EPSG:4326")
+natturu_birki_wgs84 <- project(natturu_birki, "EPSG:4326")
+
+# --- Prepare color palettes ----
+raster_pal <- colorNumeric(palette = "viridis",
+                           domain = values(broad_scale_model),
+                           na.color = "transparent")
+
+# --- Create leaflet map ----
+leaflet() %>%
+  addProviderTiles(providers$Esri.WorldImagery, group = "Satellite") %>%
+  addProviderTiles(providers$OpenStreetMap, group = "OSM") %>%
+  
+  # Add the raster layer
+  addRasterImage(broad_scale_model,
+                 colors = raster_pal,
+                 opacity = 0.7,
+                 project = T,
+                 group = "Afforestation ecological suitability") %>%
+  
+  # Add forest polygons
+  addPolygons(data = skoglendi_wgs84,
+              color = "darkgreen",
+              fillColor = "green",
+              fillOpacity = 0.4,
+              weight = 1,
+              group = "Ræktad Skóglendi") %>%
+  
+  addPolygons(data = natturu_birki_wgs84,
+              color = "brown",
+              fillColor = "orange",
+              fillOpacity = 0.4,
+              weight = 1,
+              group = "Náttúrulegt Birki") %>%
+  
+  # Add layer control
+  addLayersControl(
+    baseGroups = c("Satellite", "OSM"),
+    overlayGroups = c("Broad Scale Model", "Ræktad Skóglendi", "Náttúrulegt Birki"),
+    options = layersControlOptions(collapsed = FALSE)
+  ) %>%
+  
+  # Add a legend for the raster
+  addLegend(pal = raster_pal,
+            values = values(broad_scale_model),
+            title = "Afforestation ecological suitability",
+            position = "bottomright")
+
+
+```
+
+
+### Refining Local-scale suitability estimates
+
+The next step is to make the broad 1km predictions more detailed. We do this using a method called residual stacking. First, we create a model at a much finer 10m resolution, using detailed elevation data and satellite images. This model picks up local differences that the coarse model misses. We then combine this fine-scale information with the broad-scale predictions to produce a more detailed map of areas suitable for forest growth.
+
+**Digital elevation models**
+
+We use the Arctic DEM to derive fine-scale topographic variables that influence forest establishment These include slope, elevation, topographic wetness index, and the amount of solar radiation received during the summer growing season. By incorporating these high-resolution elevation-derived features, the model can capture local variations in microclimate and soil moisture that the coarse 1km predictions may miss.
+
+**Satellite imagery**
+
+We used [Google Earth satellite embeddings](https://deepmind.google/blog/alphaearth-foundations-helps-map-our-planet-in-unprecedented-detail/), which are computer-generated summaries of the Earth’s surface derived from multispectral satellite imagery. These embeddings are produced at a 10-metre spatial resolution and represented as a 64-layer stack, where each layer encodes a different aspect of the landscape. Rather than showing colours or images directly, these 64 layers form an abstract representation of what the satellite observes — including information both within and beyond the visible spectrum (such as infrared signals related to vegetation and surface materials). In simple terms, each embedding captures a compact “fingerprint” of the Earth’s surface, describing texture, reflectance, and land cover characteristics in numerical form. This allows us to analyse and compare locations consistently without working directly with the raw satellite imagery.
+
+
+```{r, echo=FALSE, message=FALSE}
+
+library(knitr)
+
+# Fine-scale environmental predictor variables
+fine_vars <- data.frame(
+  Dataset = c(
+    "ArcticDEM",
+    "ArcticDEM",
+    "ArcticDEM",
+    "ArcticDEM",
+    "AlphaEarth"
+  ),
+  Description = c(
+    "Terrain slope",
+    "Elevation (height)",
+    "Topographic Wetness Index (TWI)",
+    "Mean radiation received during growing period",
+    "64-layered satellite embeddings"
+  ),
+  Units = c(
+    "degrees",
+    "meters",
+    "unitless",
+    "MJ/m²",
+    "unitless"
+  )
+)
+
+# Render static HTML table
+kable(
+  fine_vars,
+  caption = "Table: Fine-scale environmental predictor variables used in the ecological niche model.",
+  format = "html",
+  table.attr = "class='table table-striped table-bordered'"
+)
+
+
+```
+
+**Broad-scale Ecological suitability Predictions - Reykjanes peninsula**
+
+
+
+```{r include= F}
+fine_scale <- rast("data/multiscale_betula_reykjanes_10m_embeddings.tif")
+broad_scale_cropped <- rast("data/broad_scale_model_cropped.tif")
+
+```
+
+```{r fig.height= 10, fig.width= 10}
+
+# Set layout to 2 rows, 1 column
+par(mfrow = c(2, 1))
+
+plot(broad_scale_cropped, main = "Broad-scale model")
+plot(fine_scale, main = "local-scale refined model")
+
+# Reset to default
+par(mfrow = c(1, 1))
+```
+
+-----------------------------------------------------------------------------------------------------------------
+
+## Social Factors
+
+In our suitability analysis, social factors play a critical role in determining the optimal locations for afforestation. Two key social variables are considered: **distance from roads** and **distance from towns**. These factors account for the logistics of planting and maintenance, as well as public accessibility and recreational value, reflecting the preference for having forested areas within reach of nearby communities.
+
+### Distance from Roads
+
+Accessibility to existing infrastructure is modeled using the **inverse exponential function**:
+
+\[
+P(x) = e^{-k \cdot x}
+\]
+
+where \(x\) is the distance from the nearest road and \(k\) is a decay parameter controlling how quickly preference decreases with distance. Locations closer to roads are preferred because they facilitate management, transportation, and access for planting and maintenance activities.
+
+This formulation reflects a diminishing preference with increasing distance — meaning accessibility rapidly declines as areas become more remote. A higher value of k would make the preference drop off more steeply, emphasizing proximity to infrastructure, while a smaller k creates a more gradual decline.
+
+By expressing accessibility as a continuous exponential decay, this model ensures smooth transitions in suitability across space, avoiding abrupt thresholds that might otherwise create artificial boundaries in the spatial decision-making process. 
+
+```{r echo=F, fig.height= 3, fig.width=5}
+# Inverse exponential function
+preference_function <- function(x, k = 0.01) {
+  exp(-k * x)
+}
+
+# Example: distances from 0 to 5000 meters
+distance <- seq(0, 5000, by = 10)
+
+# Calculate preference scores
+preference <- preference_function(distance, k = 0.0005)
+
+# Plot the preference curve
+plot(distance, preference, type = "l", col = "forestgreen", lwd = 2,
+     xlab = "Distance to Road (m)", ylab = "Preference",
+     main = "Inverse Exponential Preference Function")
+grid()
+
+```
+
+### Population-weighted Proximity Preference
+
+We model afforestation preference as an exponentially decaying function of distance from towns, **weighted by population size**.  
+The preference at a location \(x\) is calculated as:
+
+\[
+P(x) = \sum_{i=1}^{n} w_i \, e^{-\lambda \, d_i(x)}
+\]
+
+where  
+
+- \(P(x)\) – preference at location \(x\)  
+- \(w_i\) – population weight of town \(i\) (e.g., number of inhabitants)  
+- \(\lambda\) – decay-rate parameter controlling how quickly preference decreases with distance  
+- \(d_i(x)\) – Euclidean distance from location \(x\) to town \(i\)  
+- \(n\) – total number of towns  
+
+This formulation captures how social accessibility to afforestation areas tends to decrease with increasing remoteness from population centers. Areas closer to towns — especially larger ones — are assigned higher suitability because they offer better community engagement opportunities.
+
+The exponential decay ensures a smooth and continuous decline in preference with distance, avoiding abrupt changes or artificial thresholds. The weighting by population size ($w_i$) ensures that proximity to major towns contributes more strongly to overall suitability than proximity to smaller settlements.
+
+In practice, the decay parameter ($\lambda$) can be tuned to reflect different planning priorities: a higher $\lambda$ emphasizes planting near urban areas (steeper decline), while a smaller $\lambda$ reflects a more gradual influence of distance, extending the social preference gradient further into rural landscapes.
+
+
+```{r echo=FALSE, fig.height=3, fig.width=5}
+# Parameters
+lambda <- 0.001
+distance <- seq(0, 10000, length.out = 500)  # distance in meters
+pop_vals <- c(1000, 2000, 4000)              # example populations
+colors <- c("darkgreen", "dodgerblue", "firebrick")
+
+# Plot setup
+plot(distance, rep(0, length(distance)), type = "n",
+     ylim = c(0, max(pop_vals)),
+     xlab = "Distance from Town (m)",
+     ylab = "Preference",
+     main = expression(paste("Preference = Population × ", e^{-lambda %.% distance})))
+
+# Add curves for each population
+for (i in seq_along(pop_vals)) {
+  pref <- pop_vals[i] * exp(-lambda * distance)
+  lines(distance, pref, col = colors[i], lwd = 2)
+}
+
+# Add legend
+legend("topright",
+       legend = paste("Population =", pop_vals),
+       col = colors, lwd = 2, bty = "n")
+
+```
+
+-----------------------------------------------------------------------------------------------------------------
+
+## Afforestation suitability mapping
+
+Typically, in suitability analysis, a Multi-Criteria Decision Analysis (MCDA) framework is adopted to guide decision-making when there are multiple factors influencing the outcome. This approach underpins the Suitability Modeler tool in ESRI ArcGIS Pro, which combines various spatial datasets to identify the most suitable locations for a specific purpose. Users provide a set of weights that represent the relative importance of each influential factor — for example, environmental conditions, accessibility, or land characteristics. These weighted factors are then standardised and combined to produce a composite suitability surface, where higher values indicate areas that best meet the defined criteria.
+
+In the current project, we extend upon traditional MCDA methods by introducing uncertainty into the weighting process. Rather than treating the weights for each factor as fixed values, we define them as plausible ranges that reflect uncertainty or variability in expert judgment and data quality. This approach recognises that the relative importance of each factor may not be precisely known and can vary under different assumptions or scenarios. By sampling across these ranges, we generate multiple realisations of the suitability model to explore how changes in the input weights influence the final results. This allows us to assess the robustness and sensitivity of the suitability outcomes, providing a more realistic representation of spatial uncertainty in decision-making. Probabilistic MCDA approaches are increasingly popular in environmental and spatial planning applications [@tang2018incorporating].
+
+### Normalization of criteria
+
+Before performing the analysis, each raster layer is normalized to a common [0 to 1] scale to ensure comparability across different measurement units and value ranges. The ecological suitability model is already constrained between 0 and 1, whereas a min-max normalisation procedure is performed on the (a) Population-weighted Proximity Preference and the (b) Distance from Roads factors to re-scale the factors. This is a common re-scaling approach: $(x - min(x)) / (max(x) - min(x))$, where $x$ is the variable of interest. This transformation scales the values of x to a 0–1 range, preserving the relative differences between observations while standardising the scale across different variables.
+
+### Suitability analysis
+
+Once the social factors were min-max normalised, we stacked all layers and performed the probabilistic MCDA over the Reykjanes Peninsula using 100 iterations and the following weight ranges listed in the table below. Over each iteration, a value is randomly sampled from each range and combined into a set of weights that sum to one. These weights are then applied to the normalized raster layers in the suitability stack, generating a unique MCDA outcome for that iteration. By repeating this process across all iterations, we produce a stack of suitability maps that collectively capture the uncertainty in the weighting scheme.
+
+```{r echo=F, fig.height= 3, fig.width=5}
+library(knitr)
+
+# Create the data frame
+weights <- data.frame(
+  Criterion = c("Eco", "Road Proximity", "Town Proximity"),
+  Min_Weight = c(0.4, 0.2, 0.2),
+  Max_Weight = c(0.6, 0.3, 0.3)
+)
+
+# Render static HTML table
+kable(
+  weights,
+  caption = "Table: Weight ranges for probabilistic MCDA over the Reykjanes Peninsula.",
+  format = "html",
+  table.attr = "class='table table-striped table-bordered'"
+)
+
+```
+
+
+```{r include= F}
+suitability <- rast("data/mean_suitability_map2.tif")
+
+```
+
+Below are preliminary suitability results for the Reykjanes peninsula, here a higher value indicates greater suitability, where 1 is highly suitable and 0 is unsuitable. 
+
+```{r fig.height= 10, fig.width= 10}
+
+plot(suitability, main = "MCDA Mean suitability analysis results", col = viridis(100, option = "A"))
+
+```
+
+
+
+## References
+

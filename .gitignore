@@ -1,0 +1,8 @@
+# R project files
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+
+# Ignore everything inside the data folder
+data/*
