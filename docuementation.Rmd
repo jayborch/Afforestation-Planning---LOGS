@@ -163,62 +163,78 @@ ENM predictions were estimated across Iceland at a 1 km spatial resolution. Thes
 
 ```{r fig.height= 5, warning=F, fig.width= 8, echo=F, fig.cap=" **Figure 1.** Broad-scale predictions of ecologically preferential areas for afforestation"}
 
+library(terra)
+library(leaflet)
+
 # --- Load and project data ----
 skoglendi <- vect("data/forests/raektad_skoglendi_Island_07052025.shp")
 natturu_birki <- vect("data/forests/Natturulegt_birkilendi_Island_15052025.shp")
-broad_scale_model <- rast("data/broad_scale_rf_prob.tif")  # adjust path if needed
+broad_scale_model <- rast("data/broad_scale_rf_prob.tif")
 
-skoglendi <- simplifyGeom(skoglendi, tolerance = 250)  
-natturu_birki <- simplifyGeom(natturu_birki, tolerance = 250) 
+skoglendi <- simplifyGeom(skoglendi, tolerance = 250)
+natturu_birki <- simplifyGeom(natturu_birki, tolerance = 250)
 
-# Reproject everything to WGS84
+# Reproject to WGS84
 skoglendi_wgs84 <- project(skoglendi, "EPSG:4326")
 natturu_birki_wgs84 <- project(natturu_birki, "EPSG:4326")
 
-# --- Prepare color palettes ----
-raster_pal <- colorNumeric(palette = "viridis",
-                           domain = values(broad_scale_model),
-                           na.color = "transparent")
+# --- Prepare color palette ----
+raster_pal <- colorNumeric(
+  palette = "viridis",
+  domain = values(broad_scale_model),
+  na.color = "transparent"
+)
 
 # --- Create leaflet map ----
 leaflet() %>%
   addProviderTiles(providers$Esri.WorldImagery, group = "Satellite") %>%
   addProviderTiles(providers$OpenStreetMap, group = "OSM") %>%
-  
-  # Add the raster layer
-  addRasterImage(broad_scale_model,
-                 colors = raster_pal,
-                 opacity = 0.7,
-                 project = T,
-                 group = "Afforestation ecological suitability") %>%
-  
-  # Add forest polygons
-  addPolygons(data = skoglendi_wgs84,
-              color = "darkgreen",
-              fillColor = "green",
-              fillOpacity = 0.4,
-              weight = 1,
-              group = "Ræktad Skóglendi") %>%
-  
-  addPolygons(data = natturu_birki_wgs84,
-              color = "brown",
-              fillColor = "orange",
-              fillOpacity = 0.4,
-              weight = 1,
-              group = "Náttúrulegt Birki") %>%
-  
-  # Add layer control
+
+  # Raster layer with matching overlay group name
+  addRasterImage(
+    broad_scale_model,
+    colors = raster_pal,
+    opacity = 0.7,
+    project = TRUE,
+    group = "Broad Scale Model"
+  ) %>%
+
+  # Forest polygons
+  addPolygons(
+    data = skoglendi_wgs84,
+    color = "darkgreen",
+    fillColor = "green",
+    fillOpacity = 0.4,
+    weight = 1,
+    group = "Ræktad Skóglendi"
+  ) %>%
+
+  addPolygons(
+    data = natturu_birki_wgs84,
+    color = "brown",
+    fillColor = "orange",
+    fillOpacity = 0.4,
+    weight = 1,
+    group = "Náttúrulegt Birki"
+  ) %>%
+
+  # Layer controls — use same group names as above
   addLayersControl(
     baseGroups = c("Satellite", "OSM"),
     overlayGroups = c("Broad Scale Model", "Ræktad Skóglendi", "Náttúrulegt Birki"),
     options = layersControlOptions(collapsed = FALSE)
   ) %>%
+
+  # Keep overlays visible when switching base maps
+  hideGroup(NULL) %>%
   
-  # Add a legend for the raster
-  addLegend(pal = raster_pal,
-            values = values(broad_scale_model),
-            title = "Afforestation ecological suitability",
-            position = "bottomright")
+  # Legend
+  addLegend(
+    pal = raster_pal,
+    values = values(broad_scale_model),
+    title = "Afforestation ecological suitability",
+    position = "bottomright"
+  )
 
 
 ```
