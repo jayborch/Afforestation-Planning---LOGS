@@ -151,6 +151,7 @@ resistance_landclass_proj <- project(resistance_landclass, terrain_resistance_ra
 combined_resistance <- terrain_resistance_raster + resistance_landclass_proj
 
 ### rasterise road network
+
 roads <- vect("data/roads/is_50v_samgongur_epsg_8088.gpkg/is_50v_samgongur_epsg_8088.gpkg", layer = "samgongur_linur")
 roads_proj <- project(roads, crs(combined_resistance))
 road_raster <- rasterize(roads_proj, resistance_raster, field = 1)
@@ -174,6 +175,69 @@ wbt_cost_distance(
   verbose_mode = TRUE
 )
 
-accumulated_cost <- rast("data/site_accessibility/accumulated_cost_to_roads.tif")
+# Load rasters
+accum <- rast("data/site_accessibility/accumulated_cost_to_roads.tif")
+backlink <- rast("data/site_accessibility/accumulated_cost_to_roads_backlink.tif")
 
+# Sample valid starting points
+valid_cells <- which(!is.na(values(accum)))
+set.seed(42)
+sample_cells <- sample(valid_cells, size = 500)
+xy_start <- xyFromCell(accum, sample_cells)
+
+# Load rasters
+accum <- rast("data/site_accessibility/accumulated_cost_to_roads.tif")
+backlink <- rast("data/site_accessibility/accumulated_cost_to_roads_backlink.tif")
+
+# Identify only valid cells in accumulated cost raster
+valid_cells <- which(!is.na(values(accum)))
+
+# Sample particles only from valid cells
+n_particles <- 2000
+set.seed(42)
+sample_cells <- sample(valid_cells, size = n_particles)
+
+# Convert sampled cells to XY coordinates
+xy_start <- xyFromCell(accum, sample_cells)
+
+# Particle tracing parameters
+max_steps <- 1000  # safety limit to avoid infinite loops
+paths <- vector("list", n_particles)
+
+# Precompute backlink values as a vector for faster access
+backlink_vals <- values(backlink)
+
+# Particle tracing loop
+for (i in seq_len(n_particles)) {
+  particle_path <- xy_start[i, , drop = FALSE]
+  current_cell <- sample_cells[i]
+  steps <- 0
+  
+  while (!is.na(current_cell) && backlink_vals[current_cell] != 0 && steps < max_steps) {
+    # D8 neighbors
+    nbrs <- adjacent(backlink, current_cell, directions = 8, pairs = TRUE)
+    if (nrow(nbrs) == 0) break
+    
+    # Follow backlink: find neighbor with matching backlink value
+    next_idx <- which(backlink_vals[nbrs[,2]] == backlink_vals[current_cell])
+    if (length(next_idx) == 0) break
+    
+    next_cell <- nbrs[next_idx[1], 2]  # take the first matching neighbor
+    xy_next <- xyFromCell(backlink, next_cell)
+    particle_path <- rbind(particle_path, xy_next)
+    
+    current_cell <- next_cell
+    steps <- steps + 1
+  }
+  
+  paths[[i]] <- particle_path
+}
+
+# Plot the raster as background
+plot(accum, main = "Particle Paths to Roads", col = terrain.colors(50))
+
+# Overlay paths
+for(i in seq_along(paths)) {
+  lines(paths[[i]][,1], paths[[i]][,2], col = rgb(1,0,0,0.5))
+}
 
