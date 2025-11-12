@@ -37,8 +37,8 @@ Building on these ecological layers, the analysis incorporates social and infras
 
 Finally, the project applies a probabilistic Multi-Criteria Decision Analysis (MCDA)(suitability ananlysis tool in ESRI) to integrate all dimensions of suitability—ecological, social, and infrastructural—into a unified framework. Unlike traditional MCDA approaches that rely on fixed weights, this probabilistic method samples from plausible weight ranges to represent uncertainty in the weighting process. This produces a spectrum of possible outcomes rather than a single deterministic map, supporting more flexible, risk-aware planning.
 
-Overall, this framework provides a transparent and scientifically grounded foundation for afforestation planning in Iceland. By linking large-scale ecological modelling with fine-scale environmental data and social considerations, it enables policymakers and land managers to identify where afforestation can deliver the greatest ecological and societal benefits.
-
+Overall, this framework provides a transparent and scientifically grounded foundation for afforestation planning in Iceland. By linking large-scale ecological modelling with fine-scale environmental data and social considerations, it enables policymakers and land managers to identify where afforestation can deliver the greatest ecological and societal benefits.S
+S
 -----------------------------------------------------------------------------------------------------------------
 
 ## Modelling workflow (Miro Board)
