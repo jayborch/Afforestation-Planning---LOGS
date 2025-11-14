@@ -1,18 +1,21 @@
 ---
 title: "Afforestation Planning and Suitability Assessment in Iceland"
-subtitle: "Version.1.0"
-author: "J.Borchard"
+subtitle: "Version 1.0"
+author: "J. Borchard"
 date: "`r Sys.Date()`"
+
 output:
   html_document:
+    includes:
+      in_header: header.html
+    css: styles.css
     toc: true
     toc_float: true
     number_sections: true
+
 bibliography: references.bib
 
 ---
-
-
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)

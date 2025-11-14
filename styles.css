@@ -1,0 +1,52 @@
+/* -------------------------
+   PARALLAX HEADER SECTION
+   ------------------------- */
+.parallax {
+  background-image: url("img/forest_image.jpg");
+  height: 400px;
+  background-attachment: fixed;
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: cover;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Logo inside parallax header */
+.parallax-logo {
+  max-height: 150px;        /* adjust height of logo */
+  width: auto;
+  display: block;
+  margin: 0 auto;           /* center horizontally */
+}
+
+/* If you still have a title, you can keep or remove this */
+.parallax-title {
+  color: white;
+  font-size: 48px;
+  font-weight: bold;
+  text-shadow: 2px 2px 8px rgba(0,0,0,0.7);
+  margin: 0;
+}
+
+/* -------------------------
+   TOC FLOATING BELOW HEADER
+   ------------------------- */
+#tocify-wrapper {
+  position: sticky;       /* Sticky behavior */
+  top: 20px;              /* Distance from top when it becomes sticky */
+  margin-top: 420px;      /* Offset to appear below the banner */
+  left: 20px;             /* Distance from left */
+  width: 250px;
+  max-height: 80vh;
+  overflow-y: auto;
+
+  background: rgba(255,255,255,0.95);
+  backdrop-filter: blur(4px);
+  border-radius: 6px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+  padding: 10px;
+
+  z-index: 1000;
+}
