@@ -1,6 +1,6 @@
 ---
 title: "Afforestation Planning and Suitability Assessment in Iceland"
-subtitle: "Version 1.0"
+subtitle: "Preliminary results and workflow"
 author: "J. Borchard"
 date: "`r Sys.Date()`"
 
@@ -23,10 +23,13 @@ knitr::opts_chunk$set(echo = TRUE)
 
 ```{r include=F}
 library(terra)
-library(terra)
 library(leaflet)
 library(htmltools)
 library(viridis)
+library(classInt)
+library(raster)
+library(gdistance)
+library(sp)
 
 ```
 
@@ -335,35 +338,123 @@ In our suitability analysis, social factors play a critical role in determining 
 
 ### Distance from Roads
 
-Accessibility to existing infrastructure is modeled using the **inverse exponential function**:
+We created a spatial resistance model to estimate how accessible different areas are for afforestation activities, based on the combined effects of land cover and terrain. Land-cover resistance values were assigned using the national Vistlendi habitat classes, with higher costs given to difficult environments such as wetlands, scree, lava fields, and freshwater, and lower costs to more accessible surfaces like grasslands and anthropogenic areas. To account for slope-related travel difficulty, we applied a logistic resistance function to a 10-m DEM, reflecting the increased effort and reduced mobility of field crews and lightweight vehicles on steeper ground. 
 
-\[
-P(x) = e^{-k \cdot x}
-\]
-
-where \(x\) is the distance from the nearest road and \(k\) is a decay parameter controlling how quickly preference decreases with distance. Locations closer to roads are preferred because they facilitate management, transportation, and access for planting and maintenance activities.
-
-This formulation reflects a diminishing preference with increasing distance — meaning accessibility rapidly declines as areas become more remote. A higher value of k would make the preference drop off more steeply, emphasizing proximity to infrastructure, while a smaller k creates a more gradual decline.
-
-By expressing accessibility as a continuous exponential decay, this model ensures smooth transitions in suitability across space, avoiding abrupt thresholds that might otherwise create artificial boundaries in the spatial decision-making process. 
 
 ```{r echo=F, fig.height= 3, fig.width=5}
-# Inverse exponential function
-preference_function <- function(x, k = 0.01) {
-  exp(-k * x)
+
+# --- slope resistance function ---
+resistance_slope <- function(slope_deg, a = 20, S0 = 18, b = 3) {
+  # a  = max additional resistance (1 + a = asymptotic maximum)
+  # S0 = slope at which resistance increases fastest
+  # b  = steepness of logistic curve
+  1 + a / (1 + exp(-(slope_deg - S0) / b))
 }
+# --- Create slope sequence ---
+slope_vals <- seq(0, 45, by = 0.5)
+res_vals <- resistance_slope(slope_vals)
 
-# Example: distances from 0 to 5000 meters
-distance <- seq(0, 5000, by = 10)
+# --- Plot ---
+plot(
+  slope_vals, res_vals, type = "l", lwd = 2, col = "darkred",
+  xlab = "Slope (degrees)", ylab = "Resistance multiplier",
+  main = "Slope Resistance Function"
+)
 
-# Calculate preference scores
-preference <- preference_function(distance, k = 0.0005)
 
-# Plot the preference curve
-plot(distance, preference, type = "l", col = "forestgreen", lwd = 2,
-     xlab = "Distance to Road (m)", ylab = "Preference",
-     main = "Inverse Exponential Preference Function")
-grid()
+```
+
+Both resistance layers were normalized, multiplied to produce a composite cost surface, and combined with a rasterized national road network. Using WhiteboxTools’ cumulative cost-distance algorithm, we generated an accumulated travel-cost layer that represents the relative effort required to reach each location from the nearest road, providing a realistic measure of operational accessibility for afforestation planning.
+
+```{r echo=F, fig.height= 6, fig.width=10}
+
+resist <- rast("data/site_accessibility/resistance.tif")   # resistance raster
+roads_r <-  rast("data/site_accessibility/roads.tif")              # road raster
+
+# --- Convert terra to raster (gdistance works with raster package) ---
+resist_r <- raster(resist)
+roads_r_r <- raster(roads_r)
+
+# --- 1. Pick a random road cell as start point --- 755
+road_cells <- which(values(roads_r_r) == 1)
+set.seed(777)
+start_cell <- sample(road_cells, 1)
+start_xy <- xyFromCell(roads_r_r, start_cell)
+start_sp <- SpatialPoints(start_xy, proj4string = crs(resist_r))
+
+# --- 2. Pick three random nearby destinations (within 300 m) ---
+n_dest <- 3
+end_sp_list <- lapply(1:n_dest, function(i) {
+  theta <- runif(1, 0, 2*pi)
+  dist  <- runif(1, 0, 2000)
+  end_xy <- start_xy + c(dist*cos(theta), dist*sin(theta))
+  SpatialPoints(matrix(end_xy, ncol=2), proj4string = crs(resist_r))
+})
+
+# --- 3. Crop resistance and road raster around start and destinations ---
+all_points <- do.call(rbind, c(list(start_sp), end_sp_list))
+buffer_dist <- 500  # meters
+xmin <- min(coordinates(all_points)[,1]) - buffer_dist
+xmax <- max(coordinates(all_points)[,1]) + buffer_dist
+ymin <- min(coordinates(all_points)[,2]) - buffer_dist
+ymax <- max(coordinates(all_points)[,2]) + buffer_dist
+ext_crop <- raster::extent(xmin, xmax, ymin, ymax)
+
+resist_crop <- crop(resist_r, ext_crop)
+roads_crop  <- crop(roads_r_r, ext_crop)
+
+# --- 4. Create transition object for resistance ---
+tr <- transition(resist_crop, function(x) 1/mean(x), directions = 8)
+tr <- geoCorrection(tr, type = "c")
+
+# --- 5. Compute least-cost paths ---
+lcp_list <- lapply(end_sp_list, function(end_pt) {
+  shortestPath(tr, start_sp, end_pt, output = "SpatialLines")
+})
+
+# --- 6. Plot ---
+plot(resist_crop, col = terrain.colors(50), main = "Least-Cost Paths from Road Point")       # plot roads
+points(start_sp, col = "blue", pch = 16, cex = 1.5)   # start point
+cols <- c("red", "green", "orange")                  # different colors for each LCP
+for(i in 1:n_dest) {
+  points(end_sp_list[[i]], col = cols[i], pch = 16, cex = 1.5)
+  lines(lcp_list[[i]], col = cols[i], lwd = 2)
+}
+legend("topright",
+       legend = c("Roads", "Start (road)", "Destination 1", "Destination 2", "Destination 3", "LCPs"),
+       col = c("black","blue","red","green","orange","black"),
+       pch = c(15,16,16,16,16,NA),
+       lty = c(NA,NA,NA,NA,NA,1),
+       bty = "n")
+
+
+```
+
+
+
+```{r echo=F, fig.height= 6, fig.width=10}
+
+# check
+out_accum = rast("data/site_accessibility/accumulated_cost_to_roads.tif")
+out_accum[out_accum > 10] <- 10
+
+# extract raster values (remove NA)
+vals <- values(out_accum)
+vals <- vals[!is.na(vals)]
+
+# choose number of classes
+n_classes <- 15
+
+# compute Jenks breaks
+jenks <- classIntervals(vals, n = n_classes, style = "jenks")
+breaks <- jenks$brks
+
+# plot with natural breaks using a viridis palette
+plot(out_accum,
+     breaks = breaks,
+     col = viridis(n_classes),
+     main = "Cost Accumulation for traversing the landscape from a road")
+
 
 ```
 
@@ -462,42 +553,20 @@ suitability <- rast("data/mean_suitability_map2.tif")
 
 Below are preliminary suitability results for the Reykjanes peninsula, here a higher value indicates greater suitability, where 1 is highly suitable and 0 is unsuitable. 
 
-```{r, results='asis', echo=FALSE}
-library(htmltools)
+```{r echo =F, fig.height= 9, fig.width= 15}
 
-cat(HTML('
+# Load viridis if not already
+library(viridis)
 
-<style>
-.embed-container {
-  position: relative;
-  padding-bottom: 80%;
-  height: 0;
-  max-width: 100%;
-}
-.embed-container iframe, .embed-container object {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-}
-</style>
-
-<div class="embed-container">
-  <iframe 
-    width="500" 
-    height="400" 
-    frameborder="0" 
-    scrolling="no" 
-    marginheight="0" 
-    marginwidth="0"
-    title="Preliminary afforestation suitability map"
-    src="https://portal.land.is/portal/apps/Embed/index.html?webmap=fc8317707bc24d079b5d5d0bd75dd40f&extent=-23.1574,63.7807,-21.8053,64.1436&zoom=true&previewImage=false&scale=true&disable_scroll=true&theme=light">
-  </iframe>
-</div>
-'))
+# Plot raster with magma color scale
+plot(suitability,
+     col = viridis(50, option = "magma"),
+     main = "Suitability Map",
+     axes = TRUE,
+     box = TRUE)
 
 
 ```
+
 ## References
 
