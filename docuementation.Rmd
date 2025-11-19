@@ -46,18 +46,20 @@ Overall, this framework provides a transparent and scientifically grounded found
 
 ## Modelling workflow (Miro Board)
 
+Click image to see workflow
 
 ```{r echo=FALSE}
 library(htmltools)
 
-tags$iframe(
-  width = "768",
-  height = "432",
-  src = "https://miro.com/app/live-embed/uXjVJ0UuXbM=/?embedMode=view_only_without_ui&moveToViewport=-4073,-1714,9780,4855&embedId=570735568404",
-  frameborder = "0",
-  scrolling = "no",
-  allow = "fullscreen; clipboard-read; clipboard-write",
-  allowfullscreen = NA
+tags$a(
+  href = "https://miro.com/app/live-embed/uXjVJ0UuXbM=/?embedMode=view_only_without_ui&moveToViewport=-4073,-1714,9780,4855&embedId=570735568404",
+  target = "_blank",  # open link in a new tab
+  tags$img(
+    src = "img/Afforestation suitability analysis pipeline.png",
+    width = "768",
+    height = "432",
+    alt = "Afforestation suitability analysis pipeline"
+  )
 )
 
 ```
@@ -460,13 +462,42 @@ suitability <- rast("data/mean_suitability_map2.tif")
 
 Below are preliminary suitability results for the Reykjanes peninsula, here a higher value indicates greater suitability, where 1 is highly suitable and 0 is unsuitable. 
 
-```{r fig.height= 10, fig.width= 10}
+```{r, results='asis', echo=FALSE}
+library(htmltools)
 
-plot(suitability, main = "MCDA Mean suitability analysis results", col = viridis(100, option = "A"))
+cat(HTML('
+
+<style>
+.embed-container {
+  position: relative;
+  padding-bottom: 80%;
+  height: 0;
+  max-width: 100%;
+}
+.embed-container iframe, .embed-container object {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+}
+</style>
+
+<div class="embed-container">
+  <iframe 
+    width="500" 
+    height="400" 
+    frameborder="0" 
+    scrolling="no" 
+    marginheight="0" 
+    marginwidth="0"
+    title="Preliminary afforestation suitability map"
+    src="https://portal.land.is/portal/apps/Embed/index.html?webmap=fc8317707bc24d079b5d5d0bd75dd40f&extent=-23.1574,63.7807,-21.8053,64.1436&zoom=true&previewImage=false&scale=true&disable_scroll=true&theme=light">
+  </iframe>
+</div>
+'))
+
 
 ```
-
-
-
 ## References
 
