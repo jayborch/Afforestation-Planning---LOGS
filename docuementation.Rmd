@@ -30,7 +30,16 @@ library(classInt)
 library(raster)
 library(gdistance)
 library(sp)
-
+library(knitr)
+library(terra)
+library(leaflet)
+library(RColorBrewer)
+library(sf)
+library(whitebox)
+library(terra)
+library(leaflet)
+library(classInt)
+library(viridis)
 ```
 
 ## Introduction
@@ -52,7 +61,6 @@ Overall, this framework provides a transparent and scientifically grounded found
 Click image to see workflow
 
 ```{r echo=FALSE}
-library(htmltools)
 
 tags$a(
   href = "https://miro.com/app/live-embed/uXjVJ0UuXbM=/?embedMode=view_only_without_ui&moveToViewport=-4073,-1714,9780,4855&embedId=570735568404",
@@ -69,8 +77,6 @@ tags$a(
 
 
 ```{r echo=FALSE, eval= F}
-
-library(htmltools)
 
 HTML('
 <div id="zoom-container" style="width:100%; height:600px; border:1px solid #ccc; overflow:hidden;">
@@ -118,7 +124,6 @@ Here, we used the Natturulegt birkilendi and the raektad skoglendi datasets to g
 The ENM incorporated climate, soil, and topographic variables derived from multiple global datasets. Climate variables were obtained from [WorldClim](https://www.worldclim.org/data/bioclim.html), soil properties from [SoilGrids](https://gee-community-catalog.org/projects/isric/), and terrain attributes from the [ArcticDEM](https://gee-community-catalog.org/projects/iceland_dem/) and are shown below.
 
 ```{r, echo=FALSE, message=FALSE}
-library(knitr)
 
 # Create the data frame
 vars <- data.frame(
@@ -177,9 +182,6 @@ kable(
 ENM predictions were estimated across Iceland at a 1 km spatial resolution. These predictions highlight areas with the highest ecological suitability for afforestation, providing a foundation for more detailed, fine-scale planning. The predictions can be seen below, where 0 indicates low suitability for tree establishment and 1 indicates highly preferential. 
 
 ```{r fig.height= 5, warning=F, fig.width= 8, echo=F, fig.cap=" **Figure 1.** Broad-scale predictions of ecologically preferential areas for afforestation"}
-
-library(terra)
-library(leaflet)
 
 # --- Load and project data ----
 skoglendi <- vect("data/forests/raektad_skoglendi_Island_07052025.shp")
@@ -270,8 +272,6 @@ We used [Google Earth satellite embeddings](https://deepmind.google/blog/alphaea
 
 ```{r, echo=FALSE, message=FALSE}
 
-library(knitr)
-
 # Fine-scale environmental predictor variables
 fine_vars <- data.frame(
   Dataset = c(
@@ -334,11 +334,92 @@ par(mfrow = c(1, 1))
 
 ## Social Factors
 
-In our suitability analysis, social factors play a critical role in determining the optimal locations for afforestation. Two key social variables are considered: **distance from roads** and **distance from towns**. These factors account for the logistics of planting and maintenance, as well as public accessibility and recreational value, reflecting the preference for having forested areas within reach of nearby communities.
+In our suitability analysis, social factors play a critical role in determining the optimal locations for afforestation. Two key social variables are considered: **site accessibility** and **distance from towns**. These factors account for the logistics of planting and maintenance, as well as public accessibility and recreational value, reflecting the preference for having forested areas within reach of nearby communities.
 
-### Distance from Roads
+### Site accessibility
 
-We created a spatial resistance model to estimate how accessible different areas are for afforestation activities, based on the combined effects of land cover and terrain. Land-cover resistance values were assigned using the national Vistlendi habitat classes, with higher costs given to difficult environments such as wetlands, scree, lava fields, and freshwater, and lower costs to more accessible surfaces like grasslands and anthropogenic areas. To account for slope-related travel difficulty, we applied a logistic resistance function to a 10-m DEM, reflecting the increased effort and reduced mobility of field crews and lightweight vehicles on steeper ground. 
+We created a spatial resistance model to estimate how accessible different areas are for afforestation activities, based on the combined effects of land cover and terrain. 
+
+**Land-cover resistance**
+
+Land-cover resistance values were assigned using the national Vistlendi habitat classes, with higher costs given to difficult environments such as wetlands, scree, lava fields, and freshwater, and lower costs to more accessible surfaces like grasslands and anthropogenic areas. Below is a table describe the resistance multipliers per land-class type. 
+
+```{r echo=FALSE}
+
+cost_weights <- data.frame(
+  Vistlendi = c(
+    "Melar og sandlendi",
+    "Skriður og klettar",
+    "Eyrar",
+    "Moslendi",
+    "Hraunlendi",
+    "Moldir",
+    "Strandlendi",
+    "Votlendi",
+    "Graslendi",
+    "Mólendi",
+    "Jarðhitasvæði",
+    "Aðrar landgerðir",
+    "Skóglendi",
+    "Ferskvatn",
+    "Jöklar",
+    "Fjörur"
+  ),
+  cost = c(
+    12, 90, 25, 35, 70, 20, 40, 95, 15, 30, 60, 5, 45, 100, 100, 50
+  ),
+  reason = c(
+    "Sandy & gravelly terrain, generally easy to traverse",
+    "Scree, cliffs, boulders – very difficult and risky",
+    "River plains and unstable sediments – moderate difficulty",
+    "Moss heaths, soft ground – slows movement",
+    "Lava fields, rough terrain – difficult to traverse",
+    "Loamy soils, generally easy for crews",
+    "Coastal habitats, soft sediments – moderately difficult",
+    "Wetlands, bogs – high bogging risk, very difficult",
+    "Grasslands – easy access",
+    "Heathlands – moderate difficulty",
+    "Geothermal areas, unstable ground – slows movement",
+    "Urban/agriculture/roads – very easy to traverse",
+    "Birch forest – obstacles slow movement",
+    "Lakes/rivers – effectively impassable",
+    "Glaciers – impassable",
+    "Tidal flats – soft, risky, slows movement"
+  )
+)
+
+library(knitr)
+kable(
+  cost_weights,
+  caption = "Table: Land-cover resistance multipliers with rationale",
+  format = "html",
+  table.attr = "class='table table-striped table-bordered'"
+)
+
+```
+
+
+**Terrain resistance**
+
+To account for slope-related travel difficulty, we applied a logistic resistance function to a 10-m DEM, reflecting the increased effort and reduced mobility of field crews and lightweight vehicles on steeper ground. This function is expressed below:
+
+\[
+R(\text{slope}) = 1 + \frac{a}{1 + \exp\!\left( -\dfrac{\text{slope} - S_0}{b} \right)}
+\]
+
+Where:
+
+- \(a\) controls the maximum additional resistance contributed by slope; as \(a\) increases, the upper asymptote of the curve increases.
+- \(S_0\) is the inflection point (the slope at which resistance increases most rapidly), representing the threshold where mobility begins to decline sharply.
+- \(b\) controls the steepness of the logistic curve, determining how quickly resistance rises around \(S_0\).
+- \(R(\text{slope})\) is the resulting resistance value applied to each cell based on its slope.
+
+
+The reason for using a logistic function compared to an exponential function is that resistance approaches an asymptote at high slopes, preventing the model from producing unrealistically large costs that would dominate the cost surface. At low slopes, movement cost is only marginally affected, but around a certain threshold mobility decreases rapidly as walking or driving becomes difficult. Beyond this point, extremely steep slopes are already effectively impassable, and additional steepness does not meaningfully change behaviour. If slope produces extremely large costs (as happens with an exponential function), then other important variables—vegetation, hydrology, landcover, roads, and barriers—become irrelevant, reducing the ecological or operational realism of the resulting cost surface. 
+
+**Constructing the landcover-terrain resistance surface**
+
+Both resistance layers were normalized, multiplied to produce a composite cost surface, and combined with a rasterized national road network. Using WhiteboxTools’ cumulative cost-distance algorithm, we generated an accumulated travel-cost layer that represents the relative effort required to reach each location from the nearest road, providing a realistic measure of operational accessibility for afforestation planning.
 
 
 ```{r echo=F, fig.height= 3, fig.width=5}
@@ -364,7 +445,10 @@ plot(
 
 ```
 
-Both resistance layers were normalized, multiplied to produce a composite cost surface, and combined with a rasterized national road network. Using WhiteboxTools’ cumulative cost-distance algorithm, we generated an accumulated travel-cost layer that represents the relative effort required to reach each location from the nearest road, providing a realistic measure of operational accessibility for afforestation planning.
+**Least cost paths analysis**
+
+
+
 
 ```{r echo=F, fig.height= 6, fig.width=10}
 
@@ -431,32 +515,132 @@ legend("topright",
 ```
 
 
+**Momvement-flow analysis**
 
-```{r echo=F, fig.height= 6, fig.width=10}
+Movement-flow analysis provides valuable operational and verification insights, even if it is not formally included in the MDCA. By treating the cumulative cost surface as a flow field — analogous to hydrological modeling — it identifies major low-cost movement corridors across the landscape. These corridors highlight routes where movement by crews, equipment, or vehicles is easiest, taking into account terrain and landcover resistance. Mapping these pathways helps planners visualize areas of high accessibility, locate potential bottlenecks or pinch points, and consider where staging areas, temporary roads, or trails might be most efficiently placed. Additionally, overlaying predicted corridors on satellite imagery or known infrastructure allows for visual verification, ensuring that the cost surface produces realistic, intuitive paths. While the movement-flow corridors do not directly influence site selection in the MCDA, they provide practical context, helping to understand which areas are reachable and which may be operationally challenging, ultimately improving the real-world relevance of the spatial analysis.
 
-# check
+
+```{r include = F}
+
+wbt_init()  # make sure WBT is initialized
+
+# Aggregate by factor of 10 (e.g., 10x10 cells into one)
 out_accum = rast("data/site_accessibility/accumulated_cost_to_roads.tif")
+out_accum_coarse <- aggregate(out_accum, fact = 2, fun = mean)
+
+# Save the coarser raster
+writeRaster(
+  out_accum_coarse,
+  "data/site_accessibility/accumulated_cost_to_roads_coarse.tif",
+  overwrite = TRUE
+)
+
+# 1. Fill sinks (optional, but recommended for smoother flow)
+wbt_fill_depressions(
+  dem = "data/site_accessibility/accumulated_cost_to_roads_coarse.tif",
+  output = "data/site_accessibility/accum_filled.tif",
+  verbose_mode = TRUE
+)
+
+# 2. Calculate flow accumulation
+wbt_d8_flow_accumulation(
+  input = "data/site_accessibility/accum_filled.tif",
+  output = "data/site_accessibility/flow_accum_cost.tif",
+  out_type = "cells"
+)
+
+# 3. Extract stream network (threshold = minimum accumulated flow to define a stream)
+wbt_extract_streams(
+  flow_accum = "data/site_accessibility/flow_accum_cost.tif",
+  output = "data/site_accessibility/streams_cost.tif",
+  threshold = 1000 # adjust depending on raster resolution and study area
+)
+
+```
+
+```{r echo = F, fig.height= 5, warning=F, fig.width= 8}
+
+library(terra)
+library(leaflet)
+library(classInt)
+library(viridis)
+
+# -------------------------------
+# Load rasters
+# -------------------------------
+major_movement_corridors <- rast("data/site_accessibility/streams_cost.tif")
+out_accum <- rast("data/site_accessibility/accumulated_cost_to_roads.tif")
+
+# -------------------------------
+# Preprocess movement raster
+# -------------------------------
+# Set cells that are 0 (non-movement) to NA
+major_movement_corridors[major_movement_corridors == 0] <- NA
+
+# -------------------------------
+# Preprocess accumulated cost raster
+# -------------------------------
 out_accum[out_accum > 10] <- 10
 
-# extract raster values (remove NA)
-vals <- values(out_accum)
+# Resample accumulated cost to match movement corridors
+out_accum_resampled <- resample(out_accum, major_movement_corridors, method = "bilinear")
+
+# Compute Jenks breaks
+vals <- values(out_accum_resampled)
 vals <- vals[!is.na(vals)]
-
-# choose number of classes
 n_classes <- 15
-
-# compute Jenks breaks
 jenks <- classIntervals(vals, n = n_classes, style = "jenks")
 breaks <- jenks$brks
 
-# plot with natural breaks using a viridis palette
-plot(out_accum,
-     breaks = breaks,
-     col = viridis(n_classes),
-     main = "Cost Accumulation for traversing the landscape from a road")
+# Define color palette for accumulated cost
+pal_accum <- colorBin(viridis(n_classes), bins = breaks, na.color = "transparent")
+
+# -------------------------------
+# Reproject rasters to WGS84 for Leaflet
+# -------------------------------
+major_movement_corridors_wgs <- project(major_movement_corridors, "EPSG:4326")
+out_accum_wgs <- project(out_accum_resampled, "EPSG:4326")
+
+# -------------------------------
+# Create Leaflet map with layer toggles
+# -------------------------------
+leaflet() %>%
+  addProviderTiles("Esri.WorldImagery") %>%
+  
+  # Accumulated cost layer first (so it's underneath)
+  addRasterImage(
+    out_accum_wgs,
+    colors = pal_accum,
+    opacity = 0.7,
+    group = "Accumulated Cost"
+  ) %>%
+  
+  # Movement corridors layer on top (red lines)
+  addRasterImage(
+    major_movement_corridors_wgs,
+    colors = colorNumeric(c("transparent","white"), domain = c(0,1), na.color = "transparent"),
+    opacity = 1,
+    group = "Movement Corridors"
+  ) %>%
+  
+  # Add legend for accumulated cost
+  addLegend(
+    pal = pal_accum,
+    values = values(out_accum_wgs),
+    title = "Accumulated Cost",
+    position = "bottomright",
+    group = "Accumulated Cost"
+  ) %>%
+  
+  # Layer control toggle
+  addLayersControl(
+    overlayGroups = c("Accumulated Cost", "Movement Corridors"),
+    options = layersControlOptions(collapsed = FALSE)
+  )
 
 
 ```
+
 
 ### Population-weighted Proximity Preference
 
