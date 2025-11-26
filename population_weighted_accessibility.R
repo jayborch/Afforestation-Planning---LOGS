@@ -1,3 +1,14 @@
+
+# This script models a population-weighted accessibility or "preference" surface around towns. 
+# It assumes that influence or preference of a town decays exponentially with distance. 
+# Steps:
+# 1. Plots example exponential decay curves for different town populations.
+# 2. Loads a DEM and a shapefile of towns with population data.
+# 3. For each town, computes a raster where preference decreases exponentially with distance from the town, weighted by population.
+# 4. Sums the contributions from all towns to produce a cumulative preference raster.
+# 5. Resamples the result to match the original DEM resolution and masks town locations to zero.
+# 6. Saves the final raster as a GeoTIFF for further spatial analysis.
+
 library(terra)
 
 # Parameters

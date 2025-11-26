@@ -1,3 +1,13 @@
+
+### Site accessibility model fdor afforestation
+
+# This script generates a landscape resistance surface for accessibility analysis. 
+# It combines landcover-based resistance (simplified from Vistlendi classes) 
+# and terrain-based resistance (slope-based), normalizes both layers, 
+# multiplies them to create a combined resistance raster, and incorporates roads. 
+# Finally, it calculates accumulated cost distances from the road network 
+# using WhiteboxTools for site accessibility modeling.
+
 library(terra)
 library(foreign)
 library(dplyr)
@@ -7,7 +17,7 @@ library(leaflet)
 
 wbt_init()
 
-# --- 1. Define simplified resistance classes using Vistlendi ---
+# --- 1. Define simplified resistance classes using Vistlendi --- T
 cost_weights <- data.frame(
   Vistlendi = c(
     "Melar og sandlendi",
