@@ -35,6 +35,11 @@ road_dist_norm <- (road_dist_log - min_val) / (max_val - min_val)
 
 pop_weighted_proxity_town <- rast("data/pop_weighted_proxity_town.tif")
 
+min_val <- minmax(pop_weighted_proxity_town)[1]
+max_val <- minmax(pop_weighted_proxity_town)[2]
+pop_weighted_proxity_town_norm <- (pop_weighted_proxity_town - min_val) / (max_val - min_val)
+
+
 
 ###  Archaeological remains buffer -----------------------------------------
 
@@ -48,13 +53,9 @@ protected_BAs <- rast("data/bird areas/protected_bird_areas.tif") ### hard const
 
 
 
-
-
-
-
 ### stack, crop to AOI -----------------------------------------
 
-r_stack <- c(pop_weighted_proxity_town, 
+r_stack <- c(pop_weighted_proxity_town_norm, 
              remains, 
              IBAs,
              protected_BAs)
@@ -71,15 +72,19 @@ regions_proj <- project(regions, crs(dem))
 # Subset the region you want (2) reyjkanes
 rykb_subset <- regions_proj[regions_proj$objectid == 2, ]
 
+
 # crop stack
 r_stack_cropped <- crop(r_stack, rykb_subset)
 r_stack_cropped <- c(SDM, road_dist_norm, r_stack_cropped)
+r_stack_cropped <- mask(r_stack_cropped, rykb_subset)
+
 names(r_stack_cropped) <- c("Habitat preference", 
                             "Site acscessibility", 
                             "Pref. dist. from. cities", 
                             "Archaeological remains",
                             "Important bird areas",
                             "Protected bird areas")
+
 
 
 
