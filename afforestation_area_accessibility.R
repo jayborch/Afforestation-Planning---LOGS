@@ -8,6 +8,11 @@
 # Finally, it calculates accumulated cost distances from the road network 
 # using WhiteboxTools for site accessibility modeling.
 
+### Roads network data
+# https://gatt.lmi.is/geonetwork/srv/eng/catalog.search#/metadata/41D3314D-55AF-4FE3-9A9F-B9CB18AC5CAA
+
+
+
 library(terra)
 library(foreign)
 library(dplyr)
@@ -51,8 +56,8 @@ cost_weights <- data.frame(
     60,   # Jarðhitasvæði (geothermal, unstable ground)
     5,    # Aðrar landgerðir (urban, agriculture, roads, tracks)
     45,   # Skóglendi (birch forest – obstacles)
-    100,  # Ferskvatn (lakes/rivers – impassable)
-    100,  # Jöklar (glaciers – impassable)
+    NA,  # Ferskvatn (lakes/rivers – impassable)
+    NA,  # Jöklar (glaciers – impassable)
     50    # Fjörur (tidal flats – soft, risky)
   )
 )
@@ -115,7 +120,6 @@ landcover_norm <- (resistance_landclass_proj - mm[1,1]) / (mm[2,1] - mm[1,1])
 # combine by multiplying normalized rasters
 combined_resistance <- terrain_norm * landcover_norm
 
-
 ### rasterise road network
 
 roads <- vect("data/roads/is_50v_samgongur_epsg_8088.gpkg/is_50v_samgongur_epsg_8088.gpkg", layer = "samgongur_linur")
@@ -140,4 +144,6 @@ wbt_cost_distance(
   out_backlink = "data/site_accessibility/accumulated_cost_to_roads_backlink.tif", 
   verbose_mode = TRUE
 )
+
+cost_accum = rast("data/site_accessibility/accumulated_cost_to_roads.tif")
 
