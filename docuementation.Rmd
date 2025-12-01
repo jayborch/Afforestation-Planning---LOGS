@@ -730,27 +730,37 @@ kable(
 ```
 
 
-```{r include= F}
-suitability <- rast("data/mean_suitability_map2.tif")
+```{r, include=FALSE}
+library(terra)
+suitability <- rast("data/test5.tif")
+
+# save plot to file
+png("img/suitability.png", width=800, height=600)
+plot(suitability)
+dev.off()
+
+
 
 ```
 
 Below are preliminary suitability results for the Reykjanes peninsula, here a higher value indicates greater suitability, where 1 is highly suitable and 0 is unsuitable. 
 
-```{r echo =F, fig.height= 9, fig.width= 15}
+```{r echo=FALSE}
 
-# Load viridis if not already
-library(viridis)
-
-# Plot raster with magma color scale
-plot(suitability,
-     col = viridis(50, option = "magma"),
-     main = "Suitability Map",
-     axes = TRUE,
-     box = TRUE)
+tags$a(
+  href = "https://portal.land.is/portal/home/webmap/viewer.html?webmap=2fe9994d18f244d98d5145d0121007d4&extent=-22.7382,63.8254,-21.9334,64.0439",
+  target = "_blank",
+  tags$img(
+    src = "img/suitability.png",
+    width = "768",
+    height = "432",
+    alt = "Preliminary afforestation suitability analysis"
+  )
+)
 
 
 ```
+
 
 ## References
 
