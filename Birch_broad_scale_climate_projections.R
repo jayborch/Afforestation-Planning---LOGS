@@ -214,10 +214,16 @@ stack_for_plot <- rast(predictions_list)
 names(stack_for_plot) <- names(predictions_list)
 
 # -----------------------------
-# Convert to long dataframe for ggplot
+# 1. Add baseline raster to prediction stack
 # -----------------------------
-df_list <- lapply(names(stack_for_plot), function(tp) {
-  r <- stack_for_plot[[tp]]
+stack_with_baseline <- c(pred_raster, stack_for_plot)  # baseline first
+names(stack_with_baseline) <- c("Baseline", names(stack_for_plot))
+
+# -----------------------------
+# 2. Convert to long dataframe for ggplot
+# -----------------------------
+df_list <- lapply(names(stack_with_baseline), function(tp) {
+  r <- stack_with_baseline[[tp]]
   df <- as.data.frame(r, xy=TRUE)
   names(df)[3] <- "probability"
   df$time <- tp
@@ -226,7 +232,7 @@ df_list <- lapply(names(stack_for_plot), function(tp) {
 df_long <- bind_rows(df_list)
 
 # -----------------------------
-# Plot with facets
+# 3. Plot faceted probability map including baseline
 # -----------------------------
 ggplot(df_long, aes(x=x, y=y, fill=probability)) +
   geom_raster() +
@@ -236,7 +242,76 @@ ggplot(df_long, aes(x=x, y=y, fill=probability)) +
   labs(fill="Birch Probability", x="Longitude", y="Latitude") +
   theme_minimal()
 
+# -----------------------------
+# 4. Prepare categories for Sankey (baseline included)
+# -----------------------------
+cat_fun <- function(x) {
+  cut(x, breaks=c(-Inf, 0.5, 0.75, Inf),
+      labels=c("Unsuitable", "Suitable", "Highly suitable"))
+}
 
+cat_stack <- stack_with_baseline
+for(i in 1:nlyr(cat_stack)) {
+  values(cat_stack[[i]]) <- cat_fun(values(cat_stack[[i]]))
+}
 
+df <- as.data.frame(cat_stack, xy=TRUE)
 
+# Optional: sample pixels
+set.seed(42)
+df <- df[sample(1:nrow(df), 5000), ]
 
+# -----------------------------
+# 5. Prepare transitions
+# -----------------------------
+cat_cols <- names(cat_stack)
+df_transitions <- df %>% select(all_of(cat_cols))
+
+edges_list <- list()
+for(i in 1:(length(cat_cols)-1)) {
+  
+  tmp_df <- df_transitions[, c(i, i+1)]
+  colnames(tmp_df) <- c("from", "to")
+  
+  # Convert factors to character
+  tmp_df <- tmp_df %>% mutate(from = as.character(from),
+                              to   = as.character(to))
+  
+  # Prepend period info
+  tmp_df <- tmp_df %>% mutate(from = paste0(cat_cols[i], "_", from),
+                              to   = paste0(cat_cols[i+1], "_", to))
+  
+  # Count transitions
+  tmp_count <- as.data.frame(
+    aggregate(rep(1, nrow(tmp_df)),
+              by = list(from = tmp_df$from, to = tmp_df$to),
+              FUN = sum)
+  )
+  colnames(tmp_count)[3] <- "value"
+  
+  edges_list[[i]] <- tmp_count
+}
+
+edges_df <- do.call(rbind, edges_list)
+
+# -----------------------------
+# 6. Create nodes and links for networkD3
+# -----------------------------
+nodes <- data.frame(name = unique(c(edges_df$from, edges_df$to)))
+edges_df$source <- match(edges_df$from, nodes$name) - 1
+edges_df$target <- match(edges_df$to, nodes$name) - 1
+links <- edges_df %>% select(source, target, value)
+
+# -----------------------------
+# 7. Plot interactive Sankey including baseline
+# -----------------------------
+sankeyNetwork(
+  Links = links,
+  Nodes = nodes,
+  Source = "source",
+  Target = "target",
+  Value = "value",
+  NodeID = "name",
+  fontSize = 12,
+  nodeWidth = 30
+)
