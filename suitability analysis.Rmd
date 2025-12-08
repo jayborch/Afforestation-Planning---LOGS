@@ -5,7 +5,10 @@ date: "2025-10-16"
 output: html_document
 ---
 
-### Predicting ecologically suitable areas
+### Introduction
+
+
+
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
@@ -25,6 +28,10 @@ library(foreign)
 library(blockCV)
 library(caret)
 library(spdep)
+library(terra)
+library(sf)
+library(dplyr)
+library(xgboost)
 
 ```
 
@@ -35,67 +42,76 @@ whitebox::wbt_init()
 ```
 
 ```{r include = F}
-# --- 1) Load Iceland shapefile ---
+# lo
 iceland_shape <- vect("data/Iceland_shapefile/is_1km.shp")
+iceland_crs <- "+proj=lcc +lat_0=65 +lon_0=-19 +lat_1=64.25 +lat_2=65.75 +x_0=2700000 +y_0=300000 +ellps=GRS80 +units=m +no_defs"
 
 ```
 
-## Sampling psuedo-presences for SDM from habitat map
+### Sampling Birch Presences and Pseudo-Absences for Broad-Scale SDM – Iceland
 
-The idea here is to read in mean NDVI for the 2023 growing period in Iceland. This was data aquired from google earth enginge. 
-Then to pseudo-sample tree presences, 
+ Overview:
+ This workflow constructs the presence–absence dataset used to train the
+ broad-scale birch Species Distribution Model (SDM) for Iceland. It combines
+ (1) field-derived birch presence locations from national vegetation maps and
+ (2) ecologically informed pseudo-absences sampled using a habitat-weighted
+ probability surface derived from the NI vegetation classification.
 
+ Workflow:
+
+ 1. Birch Presences:
+    - The national “Náttúrulegt birkilendi” dataset is projected to a common CRS.
+    - A random spatial sample of birch presence points is drawn from within
+      mapped birch habitat polygons (e.g., 5,000 presences).
+
+ 2. Habitat Suitability Weights (0–1):
+    - A lookup table is created that assigns each NI vegetation type
+      (“Vistgerðir”) a birch suitability value between 0 and 1.
+    - Natural habitats receive positive weights; anthropogenic classes
+      (urban, roads, quarries, reservoirs, etc.) receive weight = 0.
+    - This table is joined to the vegetation raster attribute table.
+
+ 3. Build a Habitat-Weighted Sampling Surface:
+    - The NI vegetation raster is classified into a “birch suitability raster”
+      using the weighted lookup table.
+    - This 10 m suitability raster is aggregated to 1 km resolution to create
+      a smooth landscape-level probability surface for sampling absences.
+
+ 4. Pseudo-Absence Sampling:
+    - All non-NA 1 km cells are converted to a data frame.
+    - Pseudo-absences are randomly drawn with probability proportional to the
+      birch suitability value of each cell. This ensures:
+         • Fewer pseudo-absences in highly unsuitable areas (urban, water).
+         • More pseudo-absences in plausible birch environments, avoiding
+           unrealistic contrasts.
+    - A SpatVector of pseudo-absence points is created and projected to the
+      Iceland CRS.
+
+ 5. Combine Presences and Pseudo-Absences:
+    - Presence points are labelled presence = 1.
+    - Pseudo-absence points are labelled presence = 0.
+    - Both sets are merged into a single training dataset for SDM modelling.
+
+ Features:
+ - Ecologically informed pseudo-absence generation avoids unrealistic “true”
+   absences and follows best practices for SDM pseudo-absence sampling.
+ - Sampling is weighted, not random: pseudo-absences reflect habitat structure.
+ - Spatial consistency is maintained by projecting all layers to a common CRS.
+
+ Output:
+ A SpatVector `pa_data` containing:
+    • x, y coordinates of points
+    • presence = 1 (birch) or 0 (pseudo-absence)
+
+ This dataset is then used to train the broad-scale SDM before residual
+ modelling and fine-scale correction.
 
 ```{r include = F}
+set.seed(123)
 
-ndvi <- rast("data/GEE/NDVI_2023_growing_period/NDVI_2023_growing_period_mosaic.tif")
-skoglendi <- project(vect("data/forests/raektad_skoglendi_Island_07052025.shp"), ndvi)
-natturu_birki <- project(vect("data/forests/Natturulegt_birkilendi_Island_15052025.shp"), ndvi)
-
+natturu_birki <- project(vect("data/forests/Natturulegt_birkilendi_Island_15052025.shp"), iceland_crs)
 presence_locations  <- spatSample(natturu_birki, size = 5000, method = "random")
 ```
-
-```{r include = F, eval = F}
-
-# Combine polygons quickly
-#  forests_combined <- rbind(skoglendi, natturu_birki)
-
-# Crop + mask NDVI
-# ndvi_crop <- crop(ndvi, forests_combined)
-# ndvi_forests <- mask(ndvi_crop, forests_combined)
-# ndvi_forests[ndvi_forests < 0] <- NA
-
-# pts_ndvi <- spatSample(ndvi_forests, 
- #                       size = 10000,        # number of points
-#                        method = "random",  # random sampling
- #                       na.rm = TRUE,       # ignore NA pixels
-#                        as.points = TRUE)   # return as SpatVector points
-
-
-
-
-pts_skoglendi <- spatSample(skoglendi, size = 5000, method = "random")
-pts_birki <- spatSample(natturu_birki, size = 5000, method = "random")
-
-# --- 3) Combine both point sets ---
-pts_combined <- rbind(pts_skoglendi, pts_birki)
-
-# --- 4) Check result ---
-nrow(pts_combined)  # should be 4000
-
-# --- 5) Plot to verify visually ---
-plot(skoglendi, border = "darkgreen", col = "lightgreen")
-plot(natturu_birki, border = "brown", add = TRUE)
-points(pts_combined, col = "red", pch = 16)
-
-iceland_crs <- "+proj=lcc +lat_0=65 +lon_0=-19 +lat_1=64.25 +lat_2=65.75 +x_0=2700000 +y_0=300000 +ellps=GRS80 +units=m +no_defs"
-presence_locations <- project(pts_combined, iceland_crs)
-
-```
-
-## Sampling psuedo-absences for SDM from habitat map
-
-The idea here it to
 
 ```{r}
 
@@ -276,13 +292,67 @@ pseudo_absences   <- pseudo_absences["presence"]
 
 # --- 6) Combine presence + pseudo-absence points ---
 pa_data <- rbind(presence_locations, pseudo_absences)
-
+saveRDS(pa_data, "models/occurences.RDS")
 
 ```
 
-### Regional-scale SDM
+### Broad-Scale Environmental Predictor Assembly – Iceland SDM
 
-load in the soil
+ Overview:
+ This workflow prepares the environmental predictor stack used to train the
+ broad-scale Iceland-wide birch SDM. It compiles climate, topographic, and soil
+ layers, all resampled, cropped, and masked to a consistent Iceland extent
+ and coordinate reference system.
+
+ Workflow:
+
+ 1. Bioclimatic Predictors (WorldClim 2.1, 30 arc-sec):
+    - All BIO climatic variables (BIO1–BIO19) are loaded.
+    - Layers are cropped to a national Iceland boundary and masked to remove
+      cells outside the country.
+    - Provides temperature, precipitation, and seasonality predictors that
+      capture coarse climatic gradients across Iceland.
+
+ 2. Elevation and Slope:
+    - A 30 arc-sec DEM is loaded and aligned to the same extent as the BIO data.
+    - Slope (in degrees) is derived using a terrain operator.
+    - Elevation and slope together describe broad topographic variation, which
+      strongly influences birch distribution (exposure, drainage, cold-air flow).
+
+ 3. Topographic Position Index (TPI):
+    - A 5×5 moving window (mean filter) is used to compute local elevation.
+    - TPI = elevation − local_mean, which captures whether a cell is:
+         • ridge / convex (positive values),
+         • flat / neutral (near zero),
+         • valley / concave (negative values).
+    - TPI acts as a coarse proxy for landform context and soil/moisture regimes.
+
+ 4. Soil Properties:
+    - The upper soil layer (0–5 cm) from SoilGrids is projected to match the
+      climatic layers and cropped to Iceland.
+    - Soil variables (e.g., organic matter, pH, texture) act as slowly varying
+      edaphic predictors for broad-scale birch distribution.
+
+ 5. Compile Final Predictor Stack:
+    - All climate, topographic, and soil layers are concatenated into a single
+      raster stack (`env_stack`) for SDM model fitting.
+    - All predictors share:
+         • identical CRS,
+         • identical resolution,
+         • identical extent,
+         • full masking to Iceland boundaries.
+
+ Features:
+ - Integrates climate, terrain, and soils into a comprehensive broad-scale SDM
+   predictor set.
+ - Ensures spatial consistency across all layers via projection, cropping,
+   masking, and alignment to the same template.
+ - Designed to be coupled with presence/pseudo-absence data for XGBoost or
+   other machine learning SDMs.
+
+ Output:
+ `env_stack` — a harmonised multi-layer raster stack containing all broad-scale
+ predictors used for initial SDM model fitting before residual downscaling.
 
 
 ```{r include = F}
@@ -341,6 +411,78 @@ env_stack <- c(bio_regional_crop, slope_regional, tpi, soil_stack)
 
 ```
 
+### Broad-Scale Random Forest SDM Modelling – Iceland Birch Distribution
+
+ Overview:
+ This workflow trains the broad-scale Random Forest species distribution model
+ (SDM) that estimates national-scale suitability for birch. Presence
+ and pseudo-absence points are joined with the environmental predictor stack,
+ cleaned, and used to fit a Random Forest classifier. The model captures coarse
+ climatic and topographic controls on birch distribution across Iceland before
+ fine-scale corrections are added via residual downscaling.
+
+ Workflow:
+
+ 1. Extract Environmental Predictors at PA Locations:
+    - Climate, terrain, and soil layers from env_stack are extracted for each
+      presence and pseudo-absence location.
+    - Rows containing missing values are removed to ensure a clean modelling
+      dataset.
+    - The response variable (presence) is encoded as a factor (0/1).
+    - This produces the point-level environmental table used for model fitting.
+
+ 2. Fit the Broad-Scale Random Forest Model:
+    - A Random Forest classifier is trained using:
+         presence ~ all climate, topographic, and soil predictors
+    - ntree = 500 ensures model stability, while mtry = sqrt(p) restricts the
+      number of predictors randomly sampled at each split.
+    - Variable importance metrics and importance plots identify the primary
+      climatic drivers of birch distribution.
+
+ 3. Spatial Block Cross-Validation:
+    - A 5-fold spatial block CV is constructed to avoid spatial autocorrelation
+      inflating accuracy estimates.
+    - Training and testing subsets are generated based on spatial folds rather
+      than random point splits.
+    - Model predictions for the held-out fold are compared against observed
+      presence/absence to produce CV statistics and a confusion matrix.
+
+ 4. Iceland-Wide Prediction:
+    - The trained Random Forest is projected across the full environmental
+      predictor stack to generate a continuous probability-of-presence raster
+      for all of Iceland.
+    - The output raster is written directly to disk for downstream processing.
+
+ 5. Edge Smoothing and Reprojection:
+    - To prevent sharp artefacts when combining broad- and local-scale
+      predictions, the broad-scale raster is smoothed along boundaries using a
+      5 km focal window.
+    - The smoothed raster is reprojected and resampled to match a 10 m digital
+      elevation model (DEM), ensuring full compatibility with local-scale
+      modelling.
+
+ 6. Compute Model Residuals for Downscaling:
+    - Predicted broad-scale probabilities are extracted back to the PA points.
+    - Residuals are computed as:
+         residual = observed_presence − predicted_probability
+    - These residuals identify areas where the broad-scale climate model
+      under- or over-predicts birch presence and form the response variable for
+      the local-scale downscaling model.
+
+ Features:
+ - Produces a robust national-scale suitability model based on climate and
+   large-scale environmental gradients.
+ - Uses spatially explicit cross-validation to avoid inflated accuracy.
+ - Generates residuals that allow fine-scale drivers (terrain, microclimate,
+   landform structure) to be incorporated via local modelling.
+
+ Output:
+ - broad_scale_rf_prob.tif — national-scale birch suitability raster.
+ - Random forest model object
+ - residuals — point-level residuals used as input for the local downscaling
+   model.
+
+
 ```{r include = F}
 # Assigning presence and absence
 
@@ -368,12 +510,11 @@ importance = TRUE
 
 importance(rf_broad_model)
 varImpPlot(rf_broad_model, type = 1)
+
+saveRDS(rf_broad_model, file = "models/broad_scale_rf.rds")
 ```
 
-
 ### Cross validation
-
-Spatial cross-validation (CV) is a method used to evaluate species distribution models while accounting for spatial autocorrelation in ecological data. Traditional random CV can overestimate model performance because nearby locations often have similar environmental conditions, causing the training and test data to be spatially dependent. In spatial CV, the study area is divided into spatial blocks, and each block is systematically held out as a test set while the model is trained on the remaining blocks. This approach ensures that training and testing data are spatially separated, providing a more realistic assessment of how well the model can predict species presence or absence in unsampled areas. By repeating this process across multiple blocks or folds, researchers can obtain robust performance metrics such as accuracy, sensitivity, specificity, and AUC, giving a more reliable estimate of model generalization in space.
 
 ```{r}
 
@@ -462,8 +603,6 @@ broad_scale_rf_prob <- terra::predict(
 
 ### smooths edges
 
-Since we are combining broad-scale and local-scale models, we need to smooth the edges of the broad-scale model so that when we clip to the AOI there are no jagged edges. 
-
 ```{r}
 
 # Broadscale model (already loaded)
@@ -550,9 +689,59 @@ writeVector(sampled_forest_cells, "data/GEE/SDM_pa_points_birch.shp", overwrite 
 
 ```
 
-### Fine-scale SDM
+### Fine-scale SDM-residual modelling
 
-## Construct fine-scale predictors
+Fine-Scale terrain and satellite embeddings Species Distribution Model (SDM) residual Predictor Construction
+#
+
+ Purpose:
+ This code prepares high-resolution environmental predictors for fine-scale 
+ species distribution modeling. The predictors include topographic variables 
+ (DEM, slope, TWI) and solar radiation variables (mean growing season and 
+ peak summer radiation). These predictors will later be combined with embeddings 
+ and residuals to train fine-scale SDMs.
+
+ Workflow:
+
+ 1. Topography
+    - Compute slope from the DEM using terra::terrain().
+    - Aggregate the DEM to 100 m resolution for use in radiation modeling.
+    - Save DEM at 100 m for reproducibility and use in SAGA GIS functions.
+
+ 2. Solar Radiation (SAGA GIS: Potential Incoming Solar Radiation)
+    - Define representative mid-month days for May–September.
+    - Loop over each mid-month day to compute:
+        * Total radiation
+        * Direct radiation
+        * Diffuse radiation
+        * Duration of sunlight
+    - Use SAGA's `rsaga.pisr2` function with hourly integration.
+    - Aggregate all monthly rasters to compute:
+        * Mean growing season radiation (May–September)
+        * Peak summer radiation (June–July)
+    - Upscale radiation rasters to match DEM resolution (10 m) for SDM.
+
+ 3. Topographic Wetness Index (TWI)
+    - Compute slope and aspect using SAGA's "Slope, Aspect, Curvature" module.
+    - Compute upslope contributing area (Specific Catchment Area, SCA) using SAGA hydrology tools.
+    - Compute TWI using slope and SCA to capture soil moisture potential and hydrological context.
+    - Resulting TWI raster is aligned with DEM and other predictors.
+
+ 4. Outputs
+    - High-resolution predictor rasters (10 m):
+        * DEM_10m (original)
+        * Slope (radians)
+        * TWI
+        * Mean growing season radiation (May–Sep)
+        * Peak summer radiation (June–July)
+    - Saved both as SAGA grids for intermediate steps and as GeoTIFFs for SDM use.
+
+ Notes:
+ - Solar radiation computations assume latitude ~65° (Iceland) and hourly steps.
+ - Upscaling/downscaling ensures all predictor rasters are aligned for stacking.
+ - These predictors provide both energy (radiation) and topographic context
+   necessary for fine-scale ecological modeling.
+
 
 ## Elevation and slope
 
@@ -560,11 +749,6 @@ writeVector(sampled_forest_cells, "data/GEE/SDM_pa_points_birch.shp", overwrite 
 
 # Compute slope and aspect
 slope <- terrain(dem, v = "slope", unit = "radians")
-
-```
-
-```{r}
-
 dem_100m <- aggregate(dem, fact = 10, fun = mean)  # 100 m resolution
 writeRaster(dem_100m, filename = "data/saga_output/DEM_100m.tif", overwrite = TRUE)
 
@@ -763,13 +947,51 @@ twi <- rast("data/saga_output/TWI.tif")
 
 ```
 
-## Modelling residuals experimental
+### Modelling residuals using XGBoost
+
+Purpose:
+This chunk trains a fine-scale model to predict residuals from a broad-scale
+model using both raster-derived environmental predictors and spatial embeddings.
+The goal is to capture local variation not explained by the broad-scale model.
+
+Workflow:
+ 1. Raster predictors:
+    - Stack DEM, slope, peak summer temperature, and TWI.
+    - Extract raster values at the locations of residual observations.
+    - Remove any incomplete data points.
+
+ 2. Embeddings:
+    - Load GEE-derived embeddings from CSV.
+    - Clean and convert to sf points.
+    - Ensure CRS matches residual points for spatial operations.
+
+ 3. Spatial join:
+    - Assign nearest embedding to each residual observation.
+    - Combine raster predictor values with embeddings.
+
+ 4. Prepare XGBoost data:
+    - Extract predictor matrix and target residual vector.
+    - Create DMatrix for XGBoost training.
+
+ 5. Model training:
+    - Train a gradient boosting model (XGBoost) to predict residuals.
+    - Parameters tuned for regression with moderate depth, learning rate,
+      and subsampling for robustness.
+
+ 6. Feature importance:
+    - Evaluate predictor contributions using XGBoost's importance metrics.
+
+ Output:
+ - xgb_fine_model_res: trained XGBoost residual model
+ - importance_matrix / plot: feature importance for interpretation
+
+ Notes:
+ - Residual modeling focuses on explaining fine-scale variation not captured
+   by broad-scale predictions.
+ - Embeddings encode complex spatial/contextual patterns and improve prediction
+   of residuals at local scales.
 
 ```{r}
-library(terra)
-library(sf)
-library(dplyr)
-library(xgboost)
 
 # ===========================
 # 1. Raster predictors
@@ -868,7 +1090,9 @@ xgb.plot.importance(importance_matrix)
 
 ## Export AOI for GEE
 
-```{r}
+### DEMO area only
+
+```{r eval = F}
 
 # Load regions
 regions <- vect("data/boundaries/is_50v_mork_epsg_8088.gpkg/is_50v_mork_epsg_8088.gpkg", 
@@ -910,7 +1134,7 @@ rykb_subset <- st_union(merged_sf)
 
 ```
 
-## Read in Embeddings
+## Read in Embeddings and create fine-scale topographic-embeddings stack -----DEMO AREA
 
 ```{r}
 
@@ -927,36 +1151,21 @@ rasters_list <- lapply(tif_files, rast)
 
 # Merge tiles together (works even if extents don't match)
 merged_raster <- do.call(merge, rasters_list)
-
-# Check merged raster
-print(merged_raster)
-plot(merged_raster[[30]])  # plot first layer as example
-
-```
-
-## Create fine-scale topographic-embeddings rasterstack
-
-```{r}
-
 env_stack <- crop(env_stack, rykb_subset)
 # env_stack <- mask(env_stack, rykb_subset)
 
-# 1️⃣ Align CRS of merged_raster to env_stack
+# Align CRS of merged_raster to env_stack
 merged_raster_proj <- project(merged_raster, crs(env_stack))
 
-# 2️⃣ Resample merged_raster to match env_stack resolution and extent
+# Resample merged_raster to match env_stack resolution and extent
 merged_raster_resampled <- resample(merged_raster_proj, env_stack, method = "bilinear") 
 # "bilinear" is good for continuous data; use "near" for categorical
 
-# 3️⃣ Crop to exact env_stack extent (optional, just to be safe)
+# Crop to exact env_stack extent (optional, just to be safe)
 merged_raster_crop <- crop(merged_raster_resampled, ext(env_stack))
 
-# 4️⃣ Stack with existing env_stack
+# Stack with existing env_stack
 full_stack <- c(env_stack, merged_raster_crop)
-
-# 5️⃣ Verify
-names(full_stack)
-plot(full_stack[[1]])  # Check first layer
 
 
 ```
@@ -1014,8 +1223,7 @@ writeRaster(broad_crop, "data/broad_scale_model_cropped.tif", overwrite=TRUE)
 
 ```
 
-
-## Combine residuals to broad-scale probabilities and construct final predictions
+## Combine residuals to broad-scale probabilities and construct final predictions for demo area
 
 ```{r}
 
@@ -1039,3 +1247,403 @@ writeRaster(multiscale_reykjanes,
 
 ```
 
+## Fit fine-scale predictions across Iceland
+
+Overview:
+This pipeline processes large raster embedding datasets (e.g., GEE embeddings)
+together with environmental predictor rasters to produce fine-scale predicted
+surfaces for multiple regions of Iceland. It is designed to handle regions
+that are too large to fit entirely in memory by splitting them into smaller
+manageable chunks.
+
+Workflow:
+1. Detect all region folders containing embedding tiles (e.g., "westfjords_tiles").
+2. Merge all embedding raster tiles within a region into a single raster.
+3. Split (chunk) the merged embedding raster adaptively:
+    - The number of chunks per dimension is determined based on a user-defined
+      maximum chunk size (`max_cells`) to keep memory usage manageable.
+    - Each chunk is saved as a temporary raster (embeddings only).
+4. For each chunk:
+    - Crop and resample the environmental stack to match the chunk extent and CRS.
+    - Combine the environmental predictors with the embedding chunk to form
+      the full predictor stack.
+    - Extract values and skip the chunk if it contains only NA (e.g., ocean areas).
+    - Predict using the XGBoost model and write a chunk-level prediction raster.
+5. Mosaic all predicted chunks for a region into a single **final prediction raster**.
+    - This raster covers the entire region, preserving spatial alignment.
+    - Areas with no data (e.g., ocean) remain NA.
+6. Repeat for all region folders.
+
+Features:
+ - Adaptive chunking: automatically adjusts chunk size to balance memory usage
+   and processing speed.
+ - Skips empty chunks automatically to avoid XGBoost warnings on ocean tiles.
+ - Produces one final seamless prediction raster per region.
+ - Intermediate chunk rasters can be optionally cleaned up to save disk space.
+
+Output:
+ predictions/
+   ├── <region_folder>/
+   │    ├── chunks/           <- embedding chunks (optional intermediate)
+   │    ├── pred_chunks/      <- predicted chunk rasters (optional intermediate)
+   │    └── final_prediction.tif  <- final mosaic of predictions for the region
+
+ Notes:
+ - `max_cells` controls the maximum number of columns/rows per chunk and
+   therefore indirectly controls memory usage per chunk.
+ - The final mosaic is independent of chunk size; more chunks only affect
+   memory management and I/O, not prediction accuracy.
+
+```{r}
+
+# Load regions
+regions <- vect("data/boundaries/is_50v_mork_epsg_8088.gpkg/is_50v_mork_epsg_8088.gpkg", 
+                layer = "mork_logregluumdaemi")
+
+# Reproject to DEM CRS
+regions_proj <- project(regions, crs(dem))
+
+# Subset the region you want (2) reyjkanes
+rykb_subset <- regions_proj[regions_proj$objectid == 3,]
+rykb_sf <- st_as_sf(rykb_subset)
+plot(rykb_sf)
+
+# Convert to sf polygon (for GEE)
+st_write(rykb_sf, "data/GEE/ryk.shp", delete_dsn = TRUE, overwrite = T)
+
+```
+
+```{r}
+
+##############################################################
+## 1. Adaptive chunking function
+##############################################################
+chunk_raster_adaptive <- function(r, max_cells = 1000000, out_dir) {
+  dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+  
+  # Compute side length in cells for square chunks
+  side_cells <- ceiling(sqrt(max_cells))
+  
+  # Compute number of chunks along x and y
+  n_chunks_x <- ceiling(ncol(r) / side_cells)
+  n_chunks_y <- ceiling(nrow(r) / side_cells)
+  
+  ex <- ext(r)
+  xstep <- (ex$xmax - ex$xmin) / n_chunks_x
+  ystep <- (ex$ymax - ex$ymin) / n_chunks_y
+  
+  out_files <- c()
+  
+  for (i in 0:(n_chunks_x-1)) {
+    for (j in 0:(n_chunks_y-1)) {
+      
+      e <- ext(
+        ex$xmin + i * xstep,
+        ex$xmin + (i+1) * xstep,
+        ex$ymin + j * ystep,
+        ex$ymin + (j+1) * ystep
+      )
+      
+      ch <- crop(r, e)
+      outfile <- file.path(out_dir, paste0("chunk_", i, "_", j, ".tif"))
+      writeRaster(ch, outfile, overwrite = TRUE)
+      out_files <- c(out_files, outfile)
+    }
+  }
+  
+  return(out_files)
+}
+
+##############################################################
+## 2. Build full predictor stack for a chunk
+##############################################################
+stack_for_chunk <- function(env_stack, chunk_emb) {
+  chunk_emb <- project(chunk_emb, env_stack)
+  chunk_emb <- resample(chunk_emb, env_stack)
+  env_crop <- crop(env_stack, chunk_emb)
+  c(env_crop, chunk_emb)
+}
+
+##############################################################
+## 3. Predict for one chunk (skip empty chunks)
+##############################################################
+predict_chunk <- function(full_stack, model, outfile) {
+  vals <- terra::values(full_stack, mat = TRUE)
+  valid <- complete.cases(vals)
+  vals_clean <- vals[valid,, drop = FALSE]
+  
+  if (nrow(vals_clean) == 0) {
+    message("Skipping empty chunk: ", outfile)
+    return(NULL)
+  }
+  
+  preds <- predict(model, vals_clean)
+  
+  out_r <- full_stack[[1]]
+  values(out_r) <- NA
+  values(out_r)[valid] <- preds
+  
+  writeRaster(out_r, outfile, overwrite = TRUE)
+  return(outfile)
+}
+
+##############################################################
+## 4. Process one area folder
+##############################################################
+process_area_adaptive <- function(area_dir, env_stack, model, max_cells = 1000000, outdir_base="predictions") {
+  
+  message("Processing area: ", area_dir)
+  
+  # Merge embeddings in area folder
+  tifs <- list.files(area_dir, "\\.tif$", full.names = TRUE)
+  rs <- lapply(tifs, rast)
+  area_emb <- do.call(merge, rs)
+  
+  # Adaptive chunking
+  chunk_dir <- file.path(outdir_base, basename(area_dir), "chunks")
+  chunk_files <- chunk_raster_adaptive(area_emb, max_cells = max_cells, out_dir = chunk_dir)
+  
+  # Predict per chunk
+  pred_dir <- file.path(outdir_base, basename(area_dir), "pred_chunks")
+  dir.create(pred_dir, recursive = TRUE, showWarnings = FALSE)
+  
+  pred_files <- c()
+  
+  for (cf in chunk_files) {
+    message("  predicting chunk: ", cf)
+    
+    chunk_emb <- rast(cf)
+    full_stack <- stack_for_chunk(env_stack, chunk_emb)
+    
+    out_file <- file.path(pred_dir, paste0("pred_", basename(cf)))
+    pf <- predict_chunk(full_stack, model, out_file)
+    
+    if (!is.null(pf)) pred_files <- c(pred_files, pf)
+  }
+  
+  # Mosaic predictions back together
+  message("  mosaicing predicted chunks...")
+  if (length(pred_files) == 0) {
+    message("  No valid chunks to mosaic for area: ", area_dir)
+    return(NULL)
+  }
+  
+  r_list <- lapply(pred_files, rast)
+  final <- do.call(mosaic, r_list)
+  
+  final_out <- file.path(outdir_base, basename(area_dir), "final_prediction.tif")
+  writeRaster(final, final_out, overwrite = TRUE)
+  
+  return(final_out)
+}
+
+##############################################################
+## 5. Run the pipeline for all area folders
+##############################################################
+run_all_areas_adaptive <- function(base_dir, env_stack, model, max_cells = 1000000, outdir="predictions") {
+  
+  # Detect area folders containing "tiles"
+  areas <- list.dirs(base_dir, recursive = FALSE)
+  areas <- areas[grepl("tiles", basename(areas), ignore.case = TRUE)]
+  
+  results <- lapply(areas, function(a) {
+    process_area_adaptive(a, env_stack, model, max_cells, outdir)
+  })
+  
+  return(results)
+}
+
+##############################################################
+## 6. Run it
+##############################################################
+final_outputs <- run_all_areas_adaptive(
+  base_dir = "data/GEE",
+  env_stack = env_stack,
+  model = xgb_fine_model_res,
+  max_cells = 1000000,          # Adjust to control chunk size in memory
+  outdir = "predictions"
+)
+
+```
+
+
+```{r}
+
+library(terra)
+library(xgboost)
+library(parallel)
+
+##############################################################
+## 1. FAST adaptive chunk creation (window-based, no crop)
+##############################################################
+chunk_raster_adaptive <- function(r, max_cells = 1e6, out_dir) {
+  dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+  
+  side_cells <- ceiling(sqrt(max_cells))
+  n_chunks_x <- ceiling(ncol(r) / side_cells)
+  n_chunks_y <- ceiling(nrow(r) / side_cells)
+  
+  out_files <- vector("list", n_chunks_x * n_chunks_y)
+  id <- 1
+  
+  for (i in seq_len(n_chunks_x)) {
+    for (j in seq_len(n_chunks_y)) {
+
+      row_start <- (j - 1) * side_cells + 1
+      col_start <- (i - 1) * side_cells + 1
+
+      # window() = correct pixel-based cropping
+      win <- terra::window(
+        r,
+        row = row_start,
+        nrows = side_cells,
+        col = col_start,
+        ncols = side_cells
+      )
+
+      outfile <- file.path(out_dir, paste0("chunk_", i-1, "_", j-1, ".tif"))
+      writeRaster(win, outfile, overwrite = TRUE)
+      out_files[[id]] <- outfile
+      id <- id + 1
+    }
+  }
+  
+  out_files
+}
+
+##############################################################
+## 2. Build predictor stack
+##############################################################
+stack_for_chunk <- function(env_stack, chunk_emb) {
+
+  if (!identical(crs(env_stack), crs(chunk_emb))) {
+    message("  Reprojecting chunk...")
+    chunk_emb <- project(chunk_emb, env_stack)
+  }
+
+  chunk_emb <- resample(chunk_emb, env_stack)
+  env_crop <- crop(env_stack, ext(chunk_emb))
+
+  c(env_crop, chunk_emb)
+}
+
+##############################################################
+## 3. Predict with batching 
+##############################################################
+predict_chunk <- function(full_stack, model, outfile, batch = 50000) {
+
+  vals <- terra::values(full_stack, mat = TRUE)
+  valid <- complete.cases(vals)
+
+  if (!any(valid)) {
+    message("Skipping empty chunk: ", outfile)
+    return(NULL)
+  }
+
+  vals_clean <- vals[valid,, drop = FALSE]
+  n <- nrow(vals_clean)
+  preds <- numeric(n)
+
+  starts <- seq(1, n, by = batch)
+  for (s in starts) {
+    e <- min(s + batch - 1, n)
+    preds[s:e] <- predict(model, vals_clean[s:e, , drop = FALSE])
+  }
+
+  out_r <- full_stack[[1]]
+  values(out_r) <- NA
+  values(out_r)[valid] <- preds
+
+  writeRaster(out_r, outfile, overwrite = TRUE)
+  outfile
+}
+
+##############################################################
+## 4. Process an area (reproject embedding only once)
+##############################################################
+process_area_adaptive <- function(area_dir, env_stack, model, 
+                                  max_cells = 1e6, outdir_base="predictions",
+                                  cores = 1) {
+
+  message("Processing area: ", area_dir)
+
+  # Merge embedding tiles
+  tifs <- list.files(area_dir, "\\.tif$", full.names = TRUE)
+  rs <- lapply(tifs, rast)
+  area_emb <- do.call(merge, rs)
+
+  # Reproject whole embedding raster once
+  if (!identical(crs(env_stack), crs(area_emb))) {
+    message("Reprojecting full embedding raster...")
+    area_emb <- project(area_emb, env_stack)
+  }
+
+  # Create chunks
+  chunk_dir <- file.path(outdir_base, basename(area_dir), "chunks")
+  chunk_files <- chunk_raster_adaptive(area_emb, max_cells, chunk_dir)
+
+  pred_dir <- file.path(outdir_base, basename(area_dir), "pred_chunks")
+  dir.create(pred_dir, recursive = TRUE, showWarnings = FALSE)
+
+  ############################################################
+  ## Parallel or sequential prediction
+  ############################################################
+  predict_one <- function(cf) {
+    message("  predicting chunk: ", cf)
+    chunk_emb <- rast(cf)
+    full_stack <- stack_for_chunk(env_stack, chunk_emb)
+    out_file <- file.path(pred_dir, paste0("pred_", basename(cf)))
+    predict_chunk(full_stack, model, out_file)
+  }
+
+  if (cores > 1) {
+    message("Running in parallel on ", cores, " cores...")
+    pred_files <- mclapply(chunk_files, predict_one, mc.cores = cores)
+  } else {
+    pred_files <- lapply(chunk_files, predict_one)
+  }
+
+  pred_files <- unlist(pred_files)
+
+  ############################################################
+  ## Mosaic chunks
+  ############################################################
+  message("  mosaicing predicted chunks...")
+  r_list <- lapply(pred_files, rast)
+  final <- do.call(mosaic, r_list)
+
+  final_out <- file.path(outdir_base, basename(area_dir), "final_prediction.tif")
+  writeRaster(final, final_out, overwrite = TRUE)
+
+  final_out
+}
+
+##############################################################
+## 5. Run all areas
+##############################################################
+run_all_areas_adaptive <- function(base_dir, env_stack, model, 
+                                   max_cells = 1e6, outdir="predictions",
+                                   cores = 1) {
+  
+  areas <- list.dirs(base_dir, recursive = FALSE)
+  areas <- areas[grepl("tiles", basename(areas), ignore.case = TRUE)]
+  
+  lapply(areas, function(a) {
+    process_area_adaptive(a, env_stack, model, max_cells, outdir, cores)
+  })
+}
+
+##############################################################
+## 6. Run it
+##############################################################
+final_outputs <- run_all_areas_adaptive(
+  base_dir = "data/GEE",
+  env_stack = env_stack,
+  model = xgb_fine_model_res,
+  max_cells = 1e6,
+  outdir = "predictions",
+  cores = 6        # <-- parallel threads
+)
+
+
+```

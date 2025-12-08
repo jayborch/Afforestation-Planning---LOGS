@@ -6,3 +6,4 @@
 
 # Ignore everything inside the data folder
 data/*
+predictions/*
