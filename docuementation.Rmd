@@ -21,6 +21,11 @@ bibliography: references.bib
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
+```{r include=FALSE}
+Sys.setlocale("LC_CTYPE", "en_GB.UTF-8")
+
+```
+
 ```{r include=F}
 library(terra)
 library(leaflet)
@@ -40,6 +45,9 @@ library(terra)
 library(leaflet)
 library(classInt)
 library(viridis)
+library(dplyr)
+library(networkD3)
+library(plotly)
 ```
 
 ## Introduction
@@ -141,7 +149,7 @@ vars <- data.frame(
     "Total nitrogen (N)",
     "Soil pH",
     "Proportion of sand particles (>0.05 mm)",
-    "Proportion of silt particles (0.002–0.05 mm)",
+    "Proportion of silt particles (0.002-0.05 mm)",
     "Soil organic carbon content in the fine earth fraction",
     "Organic carbon density",
     "Organic carbon stocks",
@@ -310,8 +318,6 @@ kable(
 
 **Broad-scale Ecological suitability Predictions - Reykjanes peninsula**
 
-
-
 ```{r include= F}
 fine_scale <- rast("data/multiscale_betula_reykjanes_10m_embeddings.tif")
 broad_scale_cropped <- rast("data/broad_scale_model_cropped.tif")
@@ -328,6 +334,160 @@ plot(fine_scale, main = "local-scale refined model")
 
 # Reset to default
 par(mfrow = c(1, 1))
+```
+
+-----------------------------------------------------------------------------------------------------------------
+
+## Afforestation and climate change adaptation planning
+
+Anthropogenic climate change is driving substantial alterations in global temperature and precipitation patterns, with profound implications for species distributions and ecosystem functioning. Climate projections derived from the Coupled Model Intercomparison Project Phase 6 (CMIP6) provide standardized simulations under various Shared Socioeconomic Pathways (SSPs), reflecting different trajectories of greenhouse gas emissions and socio-economic development. These scenarios enable quantitative assessment of potential ecological responses to future climates. Integrating CMIP6 projections into species distribution models allows for the evaluation of spatial and temporal shifts in habitat suitability, facilitating informed conservation and management strategies under anticipated climate change.
+
+
+![Radiative forcing](img/radiative-forcing.jpg){ width=50% }
+
+
+To evaluate how climate change may affect the future distribution of Icelandic birch, we projected our baseline suitability model onto four future climate scenarios (ACCESS-CM2, SSP370) covering the period 2021–2100. These projections allowed us to assess both changes in suitability and the long-term persistence of favourable conditions. From the baseline and future predictions, we generated a continuous “persistence score” that summarises how consistently each location remains suitable across the century, integrating the proportion of periods in which suitability is maintained, the average suitability value across all time steps, and the length of consecutive future periods with positive conditions. This provides a smooth, non-categorical measure of climatic stability that highlights areas most likely to serve as future climate refugia for birch. The resulting surface indicates that eastern and northern Iceland show the strongest long-term persistence and are therefore expected to remain the most climatically robust regions for birch under projected warming.
+
+
+```{r echo=FALSE, fig.height= 5, warning=F, fig.width= 8}
+# Load raster stack
+proj <- rast("data/climate_change_projections/predictions/ssp370_ACCESS_CM2_stack.tif")
+
+# Rename layers (baseline first)
+layer_order <- c("Baseline", "2021-2040", "2041-2060", "2061-2080", "2081-2100")
+names(proj) <- layer_order
+proj <- proj[[layer_order]]
+
+# Optional: downsample for speed
+proj_small <- aggregate(proj, fact=4, fun=mean)
+
+# Convert to long dataframe
+df_list <- lapply(names(proj_small), function(tp) {
+  r <- proj_small[[tp]]
+  df <- as.data.frame(r, xy=TRUE)
+  names(df)[3] <- "probability"
+  df$time <- tp
+  df
+})
+df_long <- dplyr::bind_rows(df_list)
+
+# Make 'time' an ordered factor
+df_long$time <- factor(df_long$time, levels = layer_order, ordered = TRUE)
+
+# Plotly heatmap with slider (no animation)
+plot_ly(
+  df_long,
+  x = ~x,
+  y = ~y,
+  z = ~probability,
+  frame = ~time,
+  type = "heatmap",
+  colorscale = "Viridis",
+  zmin = 0, zmax = 1
+) %>%
+  layout(
+    xaxis = list(title = "Longitude"),
+    yaxis = list(title = "Latitude", scaleanchor = "x")
+  )
+```
+
+**Temporal dynamics**
+
+To better understand the dynamics of habitat suitability over time, predicted birch probabilities were categorized into discrete classes: Unsuitable (<0.5), Suitable (0.5–0.75), and Highly suitable (>0.75). These categorical layers were then analyzed to quantify transitions in suitability between consecutive climate periods. Using a Sankey diagram, we visualized the flux of cells across these suitability classes, capturing both the persistence of suitable habitat and the emergence or loss of highly suitable areas under projected climate change. This approach provides an intuitive, spatially explicit summary of potential shifts in birch distribution over the 21st century.
+
+```{r echo=FALSE, fig.height= 5, warning=F, fig.width= 8}
+
+cat_fun <- function(x) {
+  cut(x, breaks=c(-Inf, 0.5, 0.75, Inf),
+      labels=c("Unsuitable", "Suitable", "Highly suitable"))
+}
+
+cat_stack <- proj
+for(i in 1:nlyr(cat_stack)) {
+  values(cat_stack[[i]]) <- cat_fun(values(cat_stack[[i]]))
+}
+
+df <- as.data.frame(cat_stack, xy=TRUE)
+
+# -----------------------------
+# 5. Prepare transitions
+# -----------------------------
+cat_cols <- names(cat_stack)
+df_transitions <- df %>% select(all_of(cat_cols))
+
+edges_list <- list()
+for(i in 1:(length(cat_cols)-1)) {
+  
+  tmp_df <- df_transitions[, c(i, i+1)]
+  colnames(tmp_df) <- c("from", "to")
+  
+  # Convert factors to character
+  tmp_df <- tmp_df %>% mutate(from = as.character(from),
+                              to   = as.character(to))
+  
+  # Prepend period info
+  tmp_df <- tmp_df %>% mutate(from = paste0(cat_cols[i], "_", from),
+                              to   = paste0(cat_cols[i+1], "_", to))
+  
+  # Count transitions
+  tmp_count <- as.data.frame(
+    aggregate(rep(1, nrow(tmp_df)),
+              by = list(from = tmp_df$from, to = tmp_df$to),
+              FUN = sum)
+  )
+  colnames(tmp_count)[3] <- "value"
+  
+  edges_list[[i]] <- tmp_count
+}
+
+edges_df <- do.call(rbind, edges_list)
+
+# -----------------------------
+# 6. Create nodes and links for networkD3
+# -----------------------------
+nodes <- data.frame(name = unique(c(edges_df$from, edges_df$to)))
+edges_df$source <- match(edges_df$from, nodes$name) - 1
+edges_df$target <- match(edges_df$to, nodes$name) - 1
+links <- edges_df %>% select(source, target, value)
+
+# -----------------------------
+# 7. Plot interactive Sankey including baseline
+# -----------------------------
+sankeyNetwork(
+  Links = links,
+  Nodes = nodes,
+  Source = "source",
+  Target = "target",
+  Value = "value",
+  NodeID = "name",
+  fontSize = 12,
+  nodeWidth = 30
+)
+
+```
+
+
+**Persistence score**
+
+The persistence score is a composite metric designed to capture the long-term suitability of a location for birch under both baseline and future climate projections. It integrates three key components:
+
+1. **Persistence proportion ($P$)**: the fraction of time periods in which a location remains suitable (above a defined threshold, e.g., 0.5).  
+2. **Mean predicted probability ($\overline{p}$)**: the average predicted probability of suitability across all periods.  
+3. **Normalized survival ($S_{\text{norm}}$)**: the number of future periods a location remains suitable after the baseline, normalized to the range 0–1.
+
+These components are combined into a weighted composite score:
+
+\[
+S = w_{\text{persist}} \cdot P + w_{\text{mean}} \cdot \overline{p} + w_{\text{survival}} \cdot S_{\text{norm}}
+\]
+
+where $w_{\text{persist}}$, $w_{\text{mean}}$, and $w_{\text{survival}}$ are weights that sum to 1. Optionally, a monotonic transformation (e.g., a power function) can be applied to emphasize higher scores. This metric allows us to capture both the **stability of suitable conditions** (persistence) and the **intensity of suitability** (mean probability and survival) in a single, interpretable raster layer.
+
+```{r echo=FALSE, fig.height= 5, warning=F, fig.width= 8}
+
+persist <- rast("data/climate_change_projections/predictions/persistence_score.tif")
+
+plot(persist)
 ```
 
 -----------------------------------------------------------------------------------------------------------------
