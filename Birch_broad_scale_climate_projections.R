@@ -180,19 +180,39 @@ for (i in 0:3) {
 }
 
 # -----------------------------
-# Predict birch probability using GAM + PCA
+# 1. Predict baseline birch probability
+# -----------------------------
+baseline_values <- terra::values(env_stack, mat = TRUE)
+complete_rows <- complete.cases(baseline_values)
+baseline_values_complete <- baseline_values[complete_rows, ]
+
+# Apply PCA rotation (same as training)
+baseline_pcs <- predict(pca, newdata = baseline_values_complete)[, 1:n_pcs]
+colnames(baseline_pcs) <- paste0("PC", 1:n_pcs)
+baseline_pcs_df <- data.frame(baseline_pcs)
+
+# Predict probability
+baseline_pred <- predict(gam_pca, newdata = baseline_pcs_df, type = "response")
+
+# Fill raster
+baseline_rast <- rast(env_stack[[1]])  # template
+values(baseline_rast)[complete_rows] <- baseline_pred
+baseline_rast <- mask(baseline_rast, env_stack[[1]])
+
+# -----------------------------
+# 2. Predict future periods
 # -----------------------------
 predictions_list <- list()
 for (nm in names(period_stacks)) {
   cat("Predicting:", nm, "\n")
   
   # Extract raster values
-  raster_values <- terra::values(period_stacks[[nm]], mat=TRUE)
+  raster_values <- terra::values(period_stacks[[nm]], mat = TRUE)
   complete_rows <- complete.cases(raster_values)
   raster_values_complete <- raster_values[complete_rows, ]
   
   # Apply PCA rotation (same as training)
-  raster_pcs <- predict(pca, newdata=raster_values_complete)[, 1:n_pcs]
+  raster_pcs <- predict(pca, newdata = raster_values_complete)[, 1:n_pcs]
   colnames(raster_pcs) <- paste0("PC", 1:n_pcs)
   raster_pcs_df <- data.frame(raster_pcs)
   
@@ -204,20 +224,19 @@ for (nm in names(period_stacks)) {
   values(pred_raster)[complete_rows] <- predicted_prob
   pred_raster <- mask(pred_raster, period_stacks[[nm]][[1]])
   
+  # Store in list
   predictions_list[[nm]] <- pred_raster
 }
 
 # -----------------------------
-# Stack predictions for plotting
+# 3. Combine baseline + future periods into one stack
 # -----------------------------
-stack_for_plot <- rast(predictions_list)
-names(stack_for_plot) <- names(predictions_list)
+stack_with_baseline <- c(baseline_rast, rast(predictions_list))
+names(stack_with_baseline) <- c("Baseline", names(predictions_list))
 
-# -----------------------------
-# 1. Add baseline raster to prediction stack
-# -----------------------------
-stack_with_baseline <- c(pred_raster, stack_for_plot)  # baseline first
-names(stack_with_baseline) <- c("Baseline", names(stack_for_plot))
+# Write combined stack to disk
+writeRaster(stack_with_baseline, "data/climate_change_projections/predictions/ssp370_ACCESS_CM2_stack.tif", overwrite = T)
+
 
 # -----------------------------
 # 2. Convert to long dataframe for ggplot
@@ -315,3 +334,100 @@ sankeyNetwork(
   fontSize = 12,
   nodeWidth = 30
 )
+
+# -----------------------------
+# Parameters (tweak as needed)
+# -----------------------------
+suitable_thresh <- 0.5   # threshold for "suitable" used in persistence/survival
+weights <- c(persist = 0.6, meanp = 0.3, survival = 0.1)  # must sum to 1
+stopifnot(abs(sum(weights) - 1) < 1e-6)
+
+# Optional transform: "none", "power" (gamma>1 accentuates highs), or "logit_like"
+transform_type <- "power"
+power_gamma <- 1.4        # >1 emphasizes high scores, <1 compresses
+# -----------------------------
+
+n_periods <- nlyr(stack_with_baseline)
+if(n_periods < 2) stop("stack_with_baseline must include baseline + >=1 future period")
+
+# 1) Binary suitability matrix (0/1) across periods
+bin_stack <- app(stack_with_baseline, fun = function(x) as.integer(x >= suitable_thresh))
+
+# 2) Persistence proportion (0..1)
+persist_count <- app(bin_stack, fun = sum, na.rm = TRUE)      # 0..n_periods
+persist_prop  <- persist_count / n_periods                    # 0..1
+
+# 3) Mean probability across periods (0..1)
+mean_prob <- app(stack_with_baseline, fun = mean, na.rm = TRUE)
+
+# 4) Survival: number of future periods the cell remains suitable after baseline
+# Compute vectorized for speed
+bin_mat <- as.matrix(values(bin_stack))   # rows=cells, cols=periods
+nr <- nrow(bin_mat); nc <- ncol(bin_mat)
+surv_vec <- rep(NA_real_, nr)
+
+for(i in seq_len(nr)) {
+  v <- bin_mat[i, ]
+  if(all(is.na(v))) { surv_vec[i] <- NA; next }
+  if(v[1] == 0) { surv_vec[i] <- 0; next }        # baseline not suitable => survival 0
+  future_v <- v[-1]
+  if(all(is.na(future_v))) { surv_vec[i] <- NA; next }
+  # If never lost -> survive all future periods
+  if(all(future_v == 1, na.rm = TRUE)) {
+    surv_vec[i] <- (n_periods - 1)
+  } else {
+    zero_idx <- which(future_v == 0)
+    if(length(zero_idx) == 0) surv_vec[i] <- (n_periods - 1)
+    else surv_vec[i] <- (zero_idx[1] - 1)   # number of future periods survived before loss
+  }
+}
+
+# Put survival back into raster and normalize 0..1
+surv_rast <- rast(stack_with_baseline[[1]])
+vals_surv <- rep(NA_real_, ncell(surv_rast))
+valid_idx <- which(!is.na(bin_mat[,1]))  # cells with data
+vals_surv[valid_idx] <- surv_vec[valid_idx]
+values(surv_rast) <- vals_surv
+
+max_surv <- (n_periods - 1)
+norm_surv <- surv_rast / max_surv
+norm_surv <- clamp(norm_surv, lower=0, upper=1)
+
+# 5) Combine into weighted composite score (continuous)
+score_raw <- (persist_prop * weights["persist"]) +
+  (mean_prob    * weights["meanp"]) +
+  (norm_surv    * weights["survival"])
+
+# 6) Normalize to 0..1 robustly (handle NA)
+minv <- global(score_raw, "min", na.rm = TRUE)[1,1]
+maxv <- global(score_raw, "max", na.rm = TRUE)[1,1]
+if (is.na(minv) | is.na(maxv) | maxv == minv) {
+  score_norm <- score_raw  # fallback (unlikely)
+} else {
+  score_norm <- (score_raw - minv) / (maxv - minv)
+}
+
+# 7) Optional monotonic transform to emphasize highs (useful in MCDA)
+if(transform_type == "power") {
+  score_trans <- app(score_norm, fun = function(x) x^power_gamma)
+} else if(transform_type == "logit_like") {
+  # tiny logit-like: log(x/(1-x)) scaled back to 0..1 (avoid extremes)
+  eps <- 1e-6
+  score_trans <- app(score_norm, fun = function(x) {
+    x <- pmin(pmax(x, eps), 1-eps)
+    z <- log(x/(1-x))
+    # rescale z to 0..1 using theoretical min/max for x in (eps,1-eps)
+    z_min <- log(eps/(1-eps)); z_max <- log((1-eps)/eps)
+    (z - z_min) / (z_max - z_min)
+  })
+} else {
+  score_trans <- score_norm
+}
+
+# 9) Quick diagnostics: histogram + map
+par(mfrow = c(1,2))
+hist(values(score_trans), main = "Persistence score (continuous)", xlab = "score", breaks = 50)
+plot(score_trans, main = "Persistence score (continuous)")
+
+terra::writeRaster(score_trans, "data/persistence_score.tif")
+
