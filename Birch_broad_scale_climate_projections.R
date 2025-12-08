@@ -5,6 +5,7 @@ library(dplyr)
 library(sf)
 library(randomForest)
 library(mgcv)
+library(networkD3)
 
 # -----------------------------
 # read in points
@@ -429,5 +430,5 @@ par(mfrow = c(1,2))
 hist(values(score_trans), main = "Persistence score (continuous)", xlab = "score", breaks = 50)
 plot(score_trans, main = "Persistence score (continuous)")
 
-terra::writeRaster(score_trans, "data/persistence_score.tif")
+terra::writeRaster(score_trans, "data/climate_change_projections/predictions/persistence_score.tif")
 
