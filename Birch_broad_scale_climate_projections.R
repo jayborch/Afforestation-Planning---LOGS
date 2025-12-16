@@ -6,6 +6,8 @@ library(sf)
 library(randomForest)
 library(mgcv)
 library(networkD3)
+library(pROC)
+library(blockCV)
 
 # -----------------------------
 # read in points
@@ -99,17 +101,16 @@ colnames(gam_data)[-1] <- paste0("PC", 1:n_pcs)
 # Fit GAM with PCs
 # -----------------------------
 gam_pca <- mgcv::gam(
-  presence ~ s(PC1, k=12) + s(PC2, k=12) + s(PC3, k=12) + s(PC4, k=12) + s(PC5, k=12) + s(PC6, k=12) + s(PC7, k=12) + s(PC8, k=12),
+  presence ~ s(PC1, k=20) + s(PC2, k=20) + s(PC3, k=20) + s(PC4, k=20) + s(PC5, k=20) + s(PC6, k=20) + s(PC7, k=20) + s(PC8, k=20),
   family = binomial(link = "logit"),
   data = gam_data,
-  select = TRUE
+  select = T
 )
 
 gam.check(gam_pca)
 
 # Optional: plot smooths
 plot(gam_pca, pages=1, shade=TRUE, rug=TRUE)
-
 
 # -----------------------------
 # 1. Extract raster values
@@ -146,6 +147,199 @@ values(pred_raster)[complete_rows] <- predicted_prob
 
 # Optional: mask with original raster to keep NA areas
 pred_raster <- mask(pred_raster, env_stack[[1]])
+
+# -----------------------------
+# Spatial cross validation
+# -----------------------------
+
+# --- 0. Load necessary libraries (ensure these are loaded in your R session) ---
+# library(blockCV)
+# library(sf)
+# library(terra)
+# library(dplyr)
+# library(mgcv)
+# library(pROC)
+# library(ggplot2)
+
+# --- 1. Prepare Data for Spatial Blocking (unchanged) ---
+pa_data <- sdm_points 
+pa_sf <- st_as_sf(pa_data, coords = c("x", "y"), crs = crs(env_stack, proj=TRUE))
+pa_sf <- st_transform(pa_sf, crs(env_stack))
+
+# --- 2. Spatial Blocking (unchanged) ---
+set.seed(42)
+sb <- blockCV::spatialBlock(
+  speciesData = pa_sf,
+  species = "presence",
+  rasterLayer = env_stack[[1]],
+  theRange = 50000,
+  k = 5,
+  selection = "random",
+  iteration = 100,
+  showBlocks = FALSE
+)
+pa_sf$foldID <- sb$foldID
+
+# --- 3. Initialize CV Storage and Define Predictor Order ---
+k_folds <- 5
+auc_results <- numeric(k_folds)
+rmse_results <- numeric(k_folds)
+
+# ***NEW: Initialize dataframe to store all out-of-sample predictions for the plot***
+cv_predictions_all <- data.frame(
+  actual_outcome = numeric(),
+  predicted_prob = numeric()
+)
+
+# Get the exact names of the ORIGINAL predictors used to train the PCA.
+pca_predictor_names <- names(pca$center) 
+
+# --- 4. The 5-Fold Spatial Cross-Validation Loop ---
+cat("\n============================================\n")
+cat("Starting 5-Fold Spatial Cross-Validation (AUC, RMSE, & Plotting)...\n")
+cat("============================================\n")
+
+for (i in 1:k_folds) {
+  cat(paste0("  Processing Fold ", i, "...\n"))
+  
+  # a. Split points based on spatial blocks (training and testing)
+  train_sf <- pa_sf[pa_sf$foldID != i, ]
+  test_sf  <- pa_sf[pa_sf$foldID == i, ]
+  
+  # (Extracting, Cleaning, PCA, and GAM fitting steps are omitted here for brevity, 
+  # but they should be the exact same as in your original code)
+  
+  # ... (Steps b, c, and part of d to extract, apply PCA, fit GAM, and predict) ...
+  
+  # Simplified data preparation for demonstration (using full code logic from above)
+  train_vect <- terra::vect(train_sf)
+  test_vect  <- terra::vect(test_sf)
+  train_env <- as.data.frame(terra::extract(env_stack, train_vect, bind = TRUE))
+  test_env  <- as.data.frame(terra::extract(env_stack, test_vect, bind = TRUE))
+  train_env <- train_env %>% select(-any_of(c("ID", "foldID"))) %>% na.omit()
+  test_env  <- test_env %>% select(-any_of(c("ID", "foldID"))) %>% na.omit()
+  
+  train_predictors <- train_env %>% select(all_of(pca_predictor_names))
+  test_predictors  <- test_env %>% select(all_of(pca_predictor_names))
+  
+  train_pcs <- predict(pca, newdata = train_predictors)
+  test_pcs  <- predict(pca, newdata = test_predictors)
+  
+  n_pcs <- 8 # Assuming 8 PCs
+  
+  train_gam_data <- data.frame(presence = factor(train_env$presence, levels = c(0,1)),
+                               train_pcs[, 1:n_pcs])
+  test_gam_data  <- data.frame(presence = factor(test_env$presence, levels = c(0,1)),
+                               test_pcs[, 1:n_pcs])
+  
+  gam_cv <- mgcv::gam(
+    presence ~ s(PC1, k=20) + s(PC2, k=20) + s(PC3, k=20) + s(PC4, k=20) + s(PC5, k=20) + s(PC6, k=20) + s(PC7, k=20) + s(PC8, k=20),
+    family = binomial(link = "logit"),
+    data = train_gam_data,
+    select = TRUE
+  )
+  
+  predictions <- predict(gam_cv, newdata = test_gam_data, type = "response")
+  actual_outcome <- as.numeric(as.character(test_gam_data$presence))
+  
+  # --- e. Evaluate Performance (AUC and RMSE) ---
+  
+  # AUC
+  roc_curve <- pROC::roc(response = test_gam_data$presence, predictor = predictions, quiet = TRUE)
+  auc_results[i] <- pROC::auc(roc_curve)
+  
+  # RMSE
+  rmse_results[i] <- sqrt(mean((actual_outcome - predictions)^2, na.rm = TRUE))
+  
+  # ***NEW: Store predictions for calibration plot***
+  fold_results <- data.frame(
+    actual_outcome = actual_outcome,
+    predicted_prob = predictions
+  )
+  cv_predictions_all <- rbind(cv_predictions_all, fold_results)
+}
+
+# --- 5. Aggregate and Report Results (unchanged) ---
+avg_auc <- mean(auc_results, na.rm = TRUE)
+sd_auc <- sd(auc_results, na.rm = TRUE)
+avg_rmse <- mean(rmse_results, na.rm = TRUE)
+sd_rmse <- sd(rmse_results, na.rm = TRUE)
+
+cat("\n============================================\n")
+cat("   FINAL SPATIAL CROSS-VALIDATION RESULTS\n")
+cat("============================================\n")
+cat("Method: 5-Fold Spatial Block CV (50km blocks)\n")
+cat("Model: GAM with 8 Principal Components\n")
+cat(paste0("Average AUC (Discrimination): ", round(avg_auc, 3), " (SD: ", round(sd_auc, 3), ")\n"))
+cat(paste0("Average RMSE (Error Magnitude): ", round(avg_rmse, 3), " (SD: ", round(sd_rmse, 3), ")\n"))
+cat("============================================\n")
+
+
+# --- 6. Calibration Plot Generation ---
+
+# Aggregate data into 10 bins (deciles) for plotting
+calibration_data <- cv_predictions_all %>%
+  mutate(pred_bin = cut(predicted_prob, breaks = seq(0, 1, by = 0.1), include.lowest = TRUE, labels = FALSE)) %>%
+  group_by(pred_bin) %>%
+  summarise(
+    mean_predicted = mean(predicted_prob, na.rm = TRUE),
+    mean_observed = mean(actual_outcome, na.rm = TRUE),
+    n_points = n()
+  ) %>%
+  ungroup()
+
+# Create the plot
+calib_plot <- ggplot(calibration_data, aes(x = mean_predicted, y = mean_observed)) +
+  # Add the ideal 45-degree line for perfect calibration
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "gray50") +
+  # Add the observed calibration points (weighted by the number of points in the bin)
+  geom_point(aes(size = n_points), color = "darkblue") +
+  # Add a smoothed line (often a LOESS line) to show the trend
+  geom_smooth(method = "loess", se = FALSE, color = "red", linetype = "solid") +
+  scale_x_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
+  labs(
+    title = "Spatial Cross-Validation Calibration Plot (Aggregated)",
+    x = "Mean Predicted Probability (in bin)",
+    y = "Mean Observed Frequency (in bin)",
+    size = "N points"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+print(calib_plot)
+# Trigger image of the plot:
+
+
+
+# --- 7. Final Steps for Forecasting (unchanged) ---
+# Also report the overall goodness-of-fit for context (assuming gam_pca is the final model fitted on ALL data)
+# NOTE: The summary(gam_pca) line relies on a global model 'gam_pca' existing outside this loop.
+# cat(paste0("Global Deviance Explained by final model: ", round(summary(gam_pca)$dev.expl * 100, 1), "%\n"))
+cat("\nModel Validation Complete. Review the Calibration Plot for reliability before projection.\n")
+
+# --- 6. Final Steps for Forecasting ---
+# Also report the overall goodness-of-fit for context
+cat(paste0("Global Deviance Explained by final model: ", round(summary(gam_pca)$dev.expl * 100, 1), "%\n"))
+cat("\nModel Validation Complete. Next step: Future Climate Projection.\n")
+
+# -----------------------------
+# Investigating model variability
+# -----------------------------
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 # -----------------------------
 # Load projected climate data
@@ -254,13 +448,41 @@ df_long <- bind_rows(df_list)
 # -----------------------------
 # 3. Plot faceted probability map including baseline
 # -----------------------------
-ggplot(df_long, aes(x=x, y=y, fill=probability)) +
+# Create a named labeller for facet titles
+facet_labels <- c(
+  "Baseline" = "Present-day",
+  "ACCESS_CM2_ssp370_2021_2040" = "2021–2040",
+  "ACCESS_CM2_ssp370_2041_2060" = "2041–2060",
+  "ACCESS_CM2_ssp370_2061_2080" = "2061–2080",
+  "ACCESS_CM2_ssp370_2081_2100" = "2081–2100"
+)
+
+# Reorder factor levels so Present-day appears first
+df_long$time <- factor(df_long$time,
+                       levels = c("Baseline",
+                                  "ACCESS_CM2_ssp370_2021_2040",
+                                  "ACCESS_CM2_ssp370_2041_2060",
+                                  "ACCESS_CM2_ssp370_2061_2080",
+                                  "ACCESS_CM2_ssp370_2081_2100"))
+
+# Plot
+ggplot(df_long, aes(x = x, y = y, fill = probability)) +
   geom_raster() +
-  scale_fill_viridis_c(option="viridis", na.value="white", limits=c(0,1)) +
+  scale_fill_viridis_c(option = "viridis", na.value = "white",
+                       limits = c(0,1), breaks = c(0,1), labels = c("Low", "High")) +
   coord_equal() +
-  facet_wrap(~time) +
-  labs(fill="Birch Probability", x="Longitude", y="Latitude") +
-  theme_minimal()
+  facet_wrap(~time, labeller = as_labeller(facet_labels), nrow = 3) +
+  labs(fill = "Birch suitability", x = "Longitude", y = "Latitude") +
+  ggtitle("Birch Suitability Under Climate Change (SSP370; ACCESS CM2)") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 20, face = "bold", hjust = 0.5),  # centered title
+    axis.title = element_text(size = 16),       # axis labels
+    axis.text = element_text(size = 12),        # axis tick labels
+    strip.text = element_text(size = 14),       # facet labels
+    legend.title = element_text(size = 14),     # legend title
+    legend.text = element_text(size = 12)       # legend text
+  )
 
 # -----------------------------
 # 4. Prepare categories for Sankey (baseline included)
