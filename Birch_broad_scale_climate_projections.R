@@ -149,17 +149,71 @@ values(pred_raster)[complete_rows] <- predicted_prob
 pred_raster <- mask(pred_raster, env_stack[[1]])
 
 # -----------------------------
-# Spatial cross validation
+# 3. Pseudo-Bayesian Simulation for Uncertainty (FIXED SECTION)
 # -----------------------------
 
-# --- 0. Load necessary libraries (ensure these are loaded in your R session) ---
-# library(blockCV)
-# library(sf)
-# library(terra)
-# library(dplyr)
-# library(mgcv)
-# library(pROC)
-# library(ggplot2)
+raster_pcs_df <- data.frame(raster_pcs)
+colnames(raster_pcs_df) <- paste0("PC", 1:8)
+
+# --- 3A. Setup & Simulate Parameters ---
+N <-  100 # Number of simulated draws
+library(MASS) # For mvrnorm
+library(boot) # For inv.logit
+
+beta_hat <- coef(gam_pca)
+V_beta <- vcov(gam_pca, unconditional = TRUE)
+
+# Generate N simulated beta vectors
+beta_sims <- t(mvrnorm(n = N, mu = beta_hat, Sigma = V_beta))
+
+
+# --- 3B. Prediction on Full Raster Grid ---
+# **FIXED LINE:** Use the PC scores for the full raster prediction area (raster_pcs_df)
+# The Xp matrix MUST use the prediction data, NOT the model object.
+Xp <- predict(gam_pca, newdata = raster_pcs_df, type = "lpmatrix")
+
+# 3c. Calculate N sets of log-odds predictions (eta*)
+eta_sims <- Xp %*% beta_sims 
+
+# 3d. Convert log-odds to Probability (p*)
+prob_sims <- inv.logit(eta_sims) # Matrix of size (Locations x Draws)
+
+
+# -----------------------------
+# 4. Process Simulation Results into Raster Maps
+# -----------------------------
+
+# Calculate the statistics (Mean, Lower CI, Upper CI)
+prob_mean <- rowMeans(prob_sims)
+prob_lower_CI <- apply(prob_sims, 1, quantile, probs = 0.025)
+prob_upper_CI <- apply(prob_sims, 1, quantile, probs = 0.975)
+
+# Create template raster
+template_raster <- rast(env_stack[[1]]) 
+
+# Create Mean Probability Raster
+mean_raster <- template_raster
+values(mean_raster)[complete_rows] <- prob_mean
+names(mean_raster) <- "Mean_Probability"
+
+# Create Lower CI Raster
+lower_ci_raster <- template_raster
+values(lower_ci_raster)[complete_rows] <- prob_lower_CI
+names(lower_ci_raster) <- "Lower_CI"
+
+# Create Upper CI Raster
+upper_ci_raster <- template_raster
+values(upper_ci_raster)[complete_rows] <- prob_upper_CI
+names(upper_ci_raster) <- "Upper_CI"
+
+# Combine and save the results
+uncertainty_stack <- c(mean_raster, lower_ci_raster, upper_ci_raster)
+# writeRaster(uncertainty_stack, "models/current_sdm_uncertainty.tif", overwrite=TRUE)
+
+
+# -----------------------------
+# Spatial cross validation
+# -----------------------------
 
 # --- 1. Prepare Data for Spatial Blocking (unchanged) ---
 pa_data <- sdm_points 
@@ -322,24 +376,6 @@ cat("\nModel Validation Complete. Review the Calibration Plot for reliability be
 # Also report the overall goodness-of-fit for context
 cat(paste0("Global Deviance Explained by final model: ", round(summary(gam_pca)$dev.expl * 100, 1), "%\n"))
 cat("\nModel Validation Complete. Next step: Future Climate Projection.\n")
-
-# -----------------------------
-# Investigating model variability
-# -----------------------------
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 # -----------------------------
 # Load projected climate data
