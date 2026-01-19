@@ -7,9 +7,6 @@ output: html_document
 
 ### Introduction
 
-
-
-
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
@@ -517,72 +514,111 @@ saveRDS(rf_broad_model, file = "models/broad_scale_rf.rds")
 ### Cross validation
 
 ```{r}
-
-# 1) Convert presence/absence points to sf and project to raster CRS
-pa_sf <- st_as_sf(pa_data)  
-pa_sf <- st_transform(pa_sf, st_crs(env_stack))
-
-# 2) Spatial blocking
 set.seed(123)
-sb <- spatialBlock(
-  speciesData = pa_sf,
-  species = "presence",
-  rasterLayer = env_stack[[1]],  # defines extent
-  theRange = 50000,              # block size in meters
-  k = 5,                         # number of folds
-  selection = "random",
-  iteration = 100,
-  showBlocks = TRUE
+
+# --- 1. Fix CRS and Prep Spatial Folds ---
+pa_sf <- sf::st_as_sf(pa_data)
+pa_sf <- sf::st_transform(pa_sf, crs(env_stack))
+
+# Assign Spatial Folds (Crucial for Iceland's geographic gradients)
+library(blockCV)
+sb <- cv_spatial(x = pa_sf, 
+                 column = "presence", 
+                 k = 5, 
+                 size = 50000, # 50km blocks
+                 selection = "random", 
+                 iteration = 100)
+
+pa_sf$foldID <- sb$folds_ids
+
+# --- 2. Pre-Extract Environmental Data (The "Better Way") ---
+# This step ensures you don't have CRS or overlap issues inside the loop.
+pa_env_table <- terra::extract(env_stack, terra::vect(pa_sf), bind = TRUE) %>% 
+                as.data.frame()
+
+# --- 3. Initialize CV Storage ---
+k_folds <- 5
+auc_results  <- numeric(k_folds)
+rmse_results <- numeric(k_folds)
+tss_results  <- numeric(k_folds) 
+
+cv_predictions_all <- data.frame(
+  actual_outcome = numeric(),
+  predicted_prob = numeric()
 )
-pa_sf$foldID <- sb$foldID
 
-# 3) Split into training/testing for fold 1
-train <- pa_sf[pa_sf$foldID != 1, ]
-test  <- pa_sf[pa_sf$foldID == 1, ]
+# --- 4. The 5-Fold Spatial Cross-Validation Loop ---
+for (i in 1:k_folds) {
+  cat(paste0("  Processing Fold ", i, "...\n"))
+  
+  # Partition using the pre-extracted table
+  train_df <- pa_env_table[pa_env_table$foldID != i, ]
+  test_df  <- pa_env_table[pa_env_table$foldID == i, ]
+  
+  # Clean data: Remove ID, spatial info, and drop NAs
+  train_clean <- train_df %>% 
+    dplyr::select(-any_of(c("ID", "foldID", "x", "y"))) %>% 
+    na.omit() %>%
+    mutate(presence = factor(presence, levels = c(0, 1)))
 
-# 4) Convert sf to SpatVector for terra::extract
-train_vect <- vect(train)
-test_vect  <- vect(test)
+  test_clean <- test_df %>% 
+    dplyr::select(-any_of(c("ID", "foldID", "x", "y"))) %>% 
+    na.omit() %>%
+    mutate(presence = factor(presence, levels = c(0, 1)))
 
-# 5) Extract environmental variables and bind presence column
-train_env <- terra::extract(env_stack, train_vect, bind = TRUE)
-test_env  <- terra::extract(env_stack, test_vect, bind = TRUE)
+  # --- CRITICAL SAFETY CHECK ---
+  # Ensures both 0 and 1 exist in the training set to prevent the "two classes" error
+  if(length(unique(train_clean$presence)) < 2) {
+    message("  !!! Fold ", i, " skipped: Training set contains only one class.")
+    next
+  }
 
-# 6) Convert to data.frame for dplyr manipulation
-train_env <- as.data.frame(train_env)
-test_env  <- as.data.frame(test_env)
+  # Fit Model
+  rf_cv <- randomForest::randomForest(
+    presence ~ ., data = train_clean, ntree = 500,
+    mtry = floor(sqrt(ncol(train_clean) - 1))
+  )
+  
+  # Predict probabilities for the '1' class
+  predictions <- predict(rf_cv, newdata = test_clean, type = "prob")[, 2]
+  actual_outcome <- as.numeric(as.character(test_clean$presence))
+  
+  # --- Evaluate Performance ---
+  roc_curve <- pROC::roc(response = actual_outcome, predictor = predictions, quiet = TRUE)
+  auc_results[i] <- pROC::auc(roc_curve)
+  rmse_results[i] <- sqrt(mean((actual_outcome - predictions)^2))
+  
+  # Calculate Max TSS using Youden Index
+  coords <- pROC::coords(roc_curve, "best", ret = c("threshold", "sensitivity", "specificity"), 
+                         best.method = "youden")
+  tss_results[i] <- coords$sensitivity + coords$specificity - 1
+  
+  print(paste("Fold", i, "Optimal Threshold:", round(coords$threshold, 3)))
 
-# 7) Remove ID column if it exists, then remove rows with NA
-cols_to_remove <- intersect(c("ID"), colnames(train_env))
-if(length(cols_to_remove) > 0) train_env <- train_env %>% select(-all_of(cols_to_remove))
-train_env <- na.omit(train_env)
+  cv_predictions_all <- rbind(cv_predictions_all, data.frame(
+    actual_outcome = actual_outcome, predicted_prob = predictions
+  ))
+}
 
-cols_to_remove <- intersect(c("ID"), colnames(test_env))
-if(length(cols_to_remove) > 0) test_env <- test_env %>% select(-all_of(cols_to_remove))
-test_env <- na.omit(test_env)
+# --- 5. Aggregate and Report ---
+cat("\n============================================\n")
+cat("      FINAL RF SPATIAL CV RESULTS\n")
+cat("============================================\n")
+cat(paste0("Average AUC:  ", round(mean(auc_results, na.rm=T), 3), " (SD: ", round(sd(auc_results, na.rm=T), 3), ")\n"))
+cat(paste0("Average TSS:  ", round(mean(tss_results, na.rm=T), 3), " (SD: ", round(sd(tss_results, na.rm=T), 3), ")\n"))
+cat(paste0("Average RMSE: ", round(mean(rmse_results, na.rm=T), 3), " (SD: ", round(sd(rmse_results, na.rm=T), 3), ")\n"))
+cat("============================================\n")
 
-# 8) Convert presence to factor
-train_env$presence <- factor(train_env$presence, levels = c(0,1))
-test_env$presence  <- factor(test_env$presence, levels = c(0,1))
+```
 
-# 9) Quick NA check
-colSums(is.na(train_env))  # should be all 0
-colSums(is.na(test_env))   # should be all 0
+```{r}
 
-# 10) Fit Random Forest
-rf_model <- randomForest(
-  presence ~ .,
-  data = pa_climate,
-  ntree = 500,
-  mtry = floor(sqrt(ncol(pa_climate))),  # fewer variables per split
-  nodesize = 10,  
-  importance = TRUE)
+# Extract the 'best' coordinates using the Youden index
+best_coords <- pROC::coords(roc_curve, x = "best", best.method = "youden", 
+                            ret = c("threshold", "sensitivity", "specificity"))
 
-# 11) Predict on test set
-pred <- predict(rf_model, newdata = test_env, type = "response")
-
-# 12) Evaluate performance
-confusionMatrix(pred, test_env$presence)
+# Print the threshold for this specific fold
+print(paste("Fold", i, "Optimal Threshold:", round(best_coords$threshold, 3)))
 
 ```
 
@@ -1087,7 +1123,12 @@ xgb.plot.importance(importance_matrix)
 
 
 ```
+```{r}
 
+model_features <- xgb_fine_model_res$feature_names
+print(model_features)
+
+```
 ## Export AOI for GEE
 
 ### DEMO area only
@@ -1314,336 +1355,201 @@ st_write(rykb_sf, "data/GEE/ryk.shp", delete_dsn = TRUE, overwrite = T)
 ```
 
 ```{r}
-
-##############################################################
-## 1. Adaptive chunking function
-##############################################################
-chunk_raster_adaptive <- function(r, max_cells = 1000000, out_dir) {
-  dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
-  
-  # Compute side length in cells for square chunks
-  side_cells <- ceiling(sqrt(max_cells))
-  
-  # Compute number of chunks along x and y
-  n_chunks_x <- ceiling(ncol(r) / side_cells)
-  n_chunks_y <- ceiling(nrow(r) / side_cells)
-  
-  ex <- ext(r)
-  xstep <- (ex$xmax - ex$xmin) / n_chunks_x
-  ystep <- (ex$ymax - ex$ymin) / n_chunks_y
-  
-  out_files <- c()
-  
-  for (i in 0:(n_chunks_x-1)) {
-    for (j in 0:(n_chunks_y-1)) {
-      
-      e <- ext(
-        ex$xmin + i * xstep,
-        ex$xmin + (i+1) * xstep,
-        ex$ymin + j * ystep,
-        ex$ymin + (j+1) * ystep
-      )
-      
-      ch <- crop(r, e)
-      outfile <- file.path(out_dir, paste0("chunk_", i, "_", j, ".tif"))
-      writeRaster(ch, outfile, overwrite = TRUE)
-      out_files <- c(out_files, outfile)
-    }
-  }
-  
-  return(out_files)
-}
-
-##############################################################
-## 2. Build full predictor stack for a chunk
-##############################################################
-stack_for_chunk <- function(env_stack, chunk_emb) {
-  chunk_emb <- project(chunk_emb, env_stack)
-  chunk_emb <- resample(chunk_emb, env_stack)
-  env_crop <- crop(env_stack, chunk_emb)
-  c(env_crop, chunk_emb)
-}
-
-##############################################################
-## 3. Predict for one chunk (skip empty chunks)
-##############################################################
-predict_chunk <- function(full_stack, model, outfile) {
-  vals <- terra::values(full_stack, mat = TRUE)
-  valid <- complete.cases(vals)
-  vals_clean <- vals[valid,, drop = FALSE]
-  
-  if (nrow(vals_clean) == 0) {
-    message("Skipping empty chunk: ", outfile)
-    return(NULL)
-  }
-  
-  preds <- predict(model, vals_clean)
-  
-  out_r <- full_stack[[1]]
-  values(out_r) <- NA
-  values(out_r)[valid] <- preds
-  
-  writeRaster(out_r, outfile, overwrite = TRUE)
-  return(outfile)
-}
-
-##############################################################
-## 4. Process one area folder
-##############################################################
-process_area_adaptive <- function(area_dir, env_stack, model, max_cells = 1000000, outdir_base="predictions") {
-  
-  message("Processing area: ", area_dir)
-  
-  # Merge embeddings in area folder
-  tifs <- list.files(area_dir, "\\.tif$", full.names = TRUE)
-  rs <- lapply(tifs, rast)
-  area_emb <- do.call(merge, rs)
-  
-  # Adaptive chunking
-  chunk_dir <- file.path(outdir_base, basename(area_dir), "chunks")
-  chunk_files <- chunk_raster_adaptive(area_emb, max_cells = max_cells, out_dir = chunk_dir)
-  
-  # Predict per chunk
-  pred_dir <- file.path(outdir_base, basename(area_dir), "pred_chunks")
-  dir.create(pred_dir, recursive = TRUE, showWarnings = FALSE)
-  
-  pred_files <- c()
-  
-  for (cf in chunk_files) {
-    message("  predicting chunk: ", cf)
-    
-    chunk_emb <- rast(cf)
-    full_stack <- stack_for_chunk(env_stack, chunk_emb)
-    
-    out_file <- file.path(pred_dir, paste0("pred_", basename(cf)))
-    pf <- predict_chunk(full_stack, model, out_file)
-    
-    if (!is.null(pf)) pred_files <- c(pred_files, pf)
-  }
-  
-  # Mosaic predictions back together
-  message("  mosaicing predicted chunks...")
-  if (length(pred_files) == 0) {
-    message("  No valid chunks to mosaic for area: ", area_dir)
-    return(NULL)
-  }
-  
-  r_list <- lapply(pred_files, rast)
-  final <- do.call(mosaic, r_list)
-  
-  final_out <- file.path(outdir_base, basename(area_dir), "final_prediction.tif")
-  writeRaster(final, final_out, overwrite = TRUE)
-  
-  return(final_out)
-}
-
-##############################################################
-## 5. Run the pipeline for all area folders
-##############################################################
-run_all_areas_adaptive <- function(base_dir, env_stack, model, max_cells = 1000000, outdir="predictions") {
-  
-  # Detect area folders containing "tiles"
-  areas <- list.dirs(base_dir, recursive = FALSE)
-  areas <- areas[grepl("tiles", basename(areas), ignore.case = TRUE)]
-  
-  results <- lapply(areas, function(a) {
-    process_area_adaptive(a, env_stack, model, max_cells, outdir)
-  })
-  
-  return(results)
-}
-
-##############################################################
-## 6. Run it
-##############################################################
-final_outputs <- run_all_areas_adaptive(
-  base_dir = "data/GEE",
-  env_stack = env_stack,
-  model = xgb_fine_model_res,
-  max_cells = 1000000,          # Adjust to control chunk size in memory
-  outdir = "predictions"
-)
-
-```
-
-
-```{r}
-
 library(terra)
 library(xgboost)
-library(parallel)
 
-##############################################################
-## 1. FAST adaptive chunk creation (window-based, no crop)
-##############################################################
-chunk_raster_adaptive <- function(r, max_cells = 1e6, out_dir) {
+# ==============================================================================
+# 1. UTILITIES & WRAPPERS
+# ==============================================================================
+
+chunk_raster_adaptive <- function(r, max_cells = 1e8, out_dir) {
   dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
   
   side_cells <- ceiling(sqrt(max_cells))
   n_chunks_x <- ceiling(ncol(r) / side_cells)
   n_chunks_y <- ceiling(nrow(r) / side_cells)
   
-  out_files <- vector("list", n_chunks_x * n_chunks_y)
-  id <- 1
-  
+  out_files <- character(0)
+
   for (i in seq_len(n_chunks_x)) {
     for (j in seq_len(n_chunks_y)) {
 
       row_start <- (j - 1) * side_cells + 1
       col_start <- (i - 1) * side_cells + 1
+      row_end <- min(row_start + side_cells - 1, nrow(r))
+      col_end <- min(col_start + side_cells - 1, ncol(r))
 
-      # window() = correct pixel-based cropping
-      win <- terra::window(
-        r,
-        row = row_start,
-        nrows = side_cells,
-        col = col_start,
-        ncols = side_cells
-      )
+      win <- r[row_start:row_end, col_start:col_end, drop = FALSE]
 
       outfile <- file.path(out_dir, paste0("chunk_", i-1, "_", j-1, ".tif"))
       writeRaster(win, outfile, overwrite = TRUE)
-      out_files[[id]] <- outfile
-      id <- id + 1
+      out_files <- c(out_files, outfile)
     }
   }
-  
-  out_files
+
+  return(out_files)
 }
 
-##############################################################
-## 2. Build predictor stack
-##############################################################
-stack_for_chunk <- function(env_stack, chunk_emb) {
-
-  if (!identical(crs(env_stack), crs(chunk_emb))) {
-    message("  Reprojecting chunk...")
-    chunk_emb <- project(chunk_emb, env_stack)
-  }
-
-  chunk_emb <- resample(chunk_emb, env_stack)
-  env_crop <- crop(env_stack, ext(chunk_emb))
-
-  c(env_crop, chunk_emb)
+xgb_predict_wrapper <- function(model, data, ...) {
+  pred_matrix <- as.matrix(data)[, model$feature_names, drop = FALSE]
+  predict(model, newdata = pred_matrix, ...)
 }
 
-##############################################################
-## 3. Predict with batching 
-##############################################################
-predict_chunk <- function(full_stack, model, outfile, batch = 50000) {
+# ==============================================================================
+# 2. CORE PROCESSING FUNCTION (FAIL-FAST)
+# ==============================================================================
 
-  vals <- terra::values(full_stack, mat = TRUE)
-  valid <- complete.cases(vals)
+process_area_optimized <- function(
+  area_dir,
+  env_stack,
+  model,
+  max_cells = 1e8,
+  outdir_base = "predictions"
+) {
+  message("\n--- Processing Area: ", basename(area_dir), " ---")
 
-  if (!any(valid)) {
-    message("Skipping empty chunk: ", outfile)
-    return(NULL)
-  }
+  # A. READ regional tiles as VRT
+  tifs <- list.files(area_dir, pattern = "\\.tif$", full.names = TRUE)
+  if (length(tifs) == 0) stop("No TIFFs found in area: ", basename(area_dir))
 
-  vals_clean <- vals[valid,, drop = FALSE]
-  n <- nrow(vals_clean)
-  preds <- numeric(n)
+  area_vrt <- file.path(tempdir(), paste0(basename(area_dir), "_emb.vrt"))
+  vrt(tifs, area_vrt, overwrite = TRUE)
+  area_emb <- rast(area_vrt)
 
-  starts <- seq(1, n, by = batch)
-  for (s in starts) {
-    e <- min(s + batch - 1, n)
-    preds[s:e] <- predict(model, vals_clean[s:e, , drop = FALSE])
-  }
+  # B. ALIGN environmental stack
+  message("Pre-aligning environmental stack...")
+  env_aligned <- project(env_stack, area_emb, method = "near")
 
-  out_r <- full_stack[[1]]
-  values(out_r) <- NA
-  values(out_r)[valid] <- preds
-
-  writeRaster(out_r, outfile, overwrite = TRUE)
-  outfile
-}
-
-##############################################################
-## 4. Process an area (reproject embedding only once)
-##############################################################
-process_area_adaptive <- function(area_dir, env_stack, model, 
-                                  max_cells = 1e6, outdir_base="predictions",
-                                  cores = 1) {
-
-  message("Processing area: ", area_dir)
-
-  # Merge embedding tiles
-  tifs <- list.files(area_dir, "\\.tif$", full.names = TRUE)
-  rs <- lapply(tifs, rast)
-  area_emb <- do.call(merge, rs)
-
-  # Reproject whole embedding raster once
-  if (!identical(crs(env_stack), crs(area_emb))) {
-    message("Reprojecting full embedding raster...")
-    area_emb <- project(area_emb, env_stack)
-  }
-
-  # Create chunks
+  # C. CHUNK raster to disk
   chunk_dir <- file.path(outdir_base, basename(area_dir), "chunks")
   chunk_files <- chunk_raster_adaptive(area_emb, max_cells, chunk_dir)
 
+  # D. PREDICT sequentially
   pred_dir <- file.path(outdir_base, basename(area_dir), "pred_chunks")
   dir.create(pred_dir, recursive = TRUE, showWarnings = FALSE)
 
-  ############################################################
-  ## Parallel or sequential prediction
-  ############################################################
-  predict_one <- function(cf) {
-    message("  predicting chunk: ", cf)
+  message("Predicting chunks...")
+  pred_files <- character(0)
+
+  for (cf in chunk_files) {
     chunk_emb <- rast(cf)
-    full_stack <- stack_for_chunk(env_stack, chunk_emb)
+    na_count <- global(is.na(chunk_emb), "sum", na.rm = TRUE)[1, 1]
+    if (na_count == ncell(chunk_emb)) next
+
+    # Align environmental layers to chunk
+    env_sub <- resample(env_aligned, chunk_emb, method = "near")
+    
+    # Combine env layers + chunk (if chunk itself is a predictor)
+    full_stack <- c(env_sub, chunk_emb)
+
+    # === CRUCIAL FIX: Rename layers to match model feature names ===
+    names(full_stack) <- model$feature_names
+
+    # Ensure order matches model
+    full_stack_aligned <- full_stack[[model$feature_names]]
+
     out_file <- file.path(pred_dir, paste0("pred_", basename(cf)))
-    predict_chunk(full_stack, model, out_file)
+
+    # Predict
+    predict(
+      full_stack_aligned,
+      model,
+      fun = xgb_predict_wrapper,
+      filename = out_file,
+      overwrite = TRUE,
+      na.rm = TRUE,
+      wopt = list(
+        gdal = c("COMPRESS=DEFLATE", "PREDICTOR=2")
+      )
+    )
+
+    pred_files <- c(pred_files, out_file)
+    gc()
   }
 
-  if (cores > 1) {
-    message("Running in parallel on ", cores, " cores...")
-    pred_files <- mclapply(chunk_files, predict_one, mc.cores = cores)
-  } else {
-    pred_files <- lapply(chunk_files, predict_one)
+  if (length(pred_files) == 0) {
+    stop("No prediction chunks were created — all chunks were NA or failed.")
   }
 
-  pred_files <- unlist(pred_files)
+  # E. ASSEMBLE regional VRT
+  vrt_file <- file.path(
+    outdir_base,
+    basename(area_dir),
+    "suitability_mosaic.vrt"
+  )
 
-  ############################################################
-  ## Mosaic chunks
-  ############################################################
-  message("  mosaicing predicted chunks...")
-  r_list <- lapply(pred_files, rast)
-  final <- do.call(mosaic, r_list)
+  vrt(pred_files, vrt_file, overwrite = TRUE)
 
-  final_out <- file.path(outdir_base, basename(area_dir), "final_prediction.tif")
-  writeRaster(final, final_out, overwrite = TRUE)
+  # F. CLEANUP
+  unlink(chunk_dir, recursive = TRUE)
 
-  final_out
+  message("Successfully completed: ", vrt_file)
 }
 
-##############################################################
-## 5. Run all areas
-##############################################################
-run_all_areas_adaptive <- function(base_dir, env_stack, model, 
-                                   max_cells = 1e6, outdir="predictions",
-                                   cores = 1) {
-  
-  areas <- list.dirs(base_dir, recursive = FALSE)
-  areas <- areas[grepl("tiles", basename(areas), ignore.case = TRUE)]
-  
-  lapply(areas, function(a) {
-    process_area_adaptive(a, env_stack, model, max_cells, outdir, cores)
-  })
+# ==============================================================================
+# 3. BATCH EXECUTION
+# ==============================================================================
+
+base_path   <- "data/GEE"
+output_base <- "predictions"
+dir.create(output_base, showWarnings = FALSE)
+
+all_folders  <- list.dirs(base_path, full.names = TRUE, recursive = FALSE)
+tile_folders <- all_folders[grepl("tiles", all_folders, ignore.case = TRUE)]
+
+message("Found ", length(tile_folders), " regions to process.")
+
+for (area in tile_folders) {
+  # <-- FAIL-FAST: any error stops the loop immediately
+  process_area_optimized(
+    area_dir    = area,
+    env_stack   = env_stack,
+    model       = xgb_fine_model_res,
+    max_cells   = 1e8,
+    outdir_base = output_base
+  )
+  gc()
 }
 
-##############################################################
-## 6. Run it
-##############################################################
-final_outputs <- run_all_areas_adaptive(
-  base_dir = "data/GEE",
-  env_stack = env_stack,
-  model = xgb_fine_model_res,
-  max_cells = 1e6,
-  outdir = "predictions",
-  cores = 6        # <-- parallel threads
+# ==============================================================================
+# 4. FINAL MASTER VRT
+# ==============================================================================
+
+vrt_list <- list.files(
+  output_base,
+  pattern = "suitability_mosaic.vrt$",
+  recursive = TRUE,
+  full.names = TRUE
 )
+
+vrt(
+  vrt_list,
+  file.path(output_base, "Iceland_Master_Suitability_10m.vrt"),
+  overwrite = TRUE
+)
+
+message("\n--- ALL REGIONS FINISHED ---")
+
 
 
 ```
+
+```{r}
+
+library(terra)
+
+# Crop broad-scale SDM to residual footprint
+broad_crop <- crop(broad_scale_rf_prob_10m, fine_resid)
+
+# Align grids exactly (safety step)
+broad_crop <- project(broad_crop, fine_resid)
+
+# Add residuals
+multiscale_country <- broad_crop + fine_resid
+
+# Clamp
+multiscale_country <- clamp(multiscale_country, 0, 1)
+
+writeRaster(multiscale_country, "predictions/master_multiscale_birch_sdm.tif")
+```
+
