@@ -157,7 +157,7 @@ src_y <- all_coords[single_src_idx, 2]
 
 # 2. ZOOM SETTINGS (15km buffer)
 zoom_dist <- 15000 
-n_seeds <- 300
+n_seeds <- 500
 
 # Crop the background for the zoom
 crop_ext <- ext(src_x - zoom_dist, src_x + zoom_dist, 
@@ -219,7 +219,7 @@ anim <- ggplot() +
   theme_void() +
   theme(plot.background = element_rect(fill = "black"),
         plot.title = element_text(color = "white", face = "bold", size = 16)) +
-  labs(title = "Close-up: Mechanistic Seed Plume",
+  labs(title = "Mechanistic Seed Plume",
        subtitle = "Red triangle = Parent Tree | Green = Established Seedlings")
 
 animate(anim, nframes = 100, fps = 20, width = 800, height = 800)
