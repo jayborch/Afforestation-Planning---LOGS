@@ -126,24 +126,144 @@ roads <- vect("data/roads/is_50v_samgongur_epsg_8088.gpkg/is_50v_samgongur_epsg_
 roads_proj <- project(roads, crs(combined_resistance))
 road_raster <- rasterize(roads_proj, combined_resistance, field = 1)
 
-### test sample
-reyk <- vect("data/GEE/roi_rykb_subset.shp")
-reyk_project <- project(reyk, crs(combined_resistance))
 
-combined_resistance <- crop(combined_resistance, reyk_project)
-road_raster <- crop(road_raster, reyk_project)
+# --- 3. Continuous Tiling Logic ---
+# This creates a seamless grid. Every row in tile_mat is now treated as a tile.
+tile_mat <- getTileExtents(combined_resistance, y = c(5000, 5000), buffer = 10000)
 
-writeRaster(combined_resistance, "data/site_accessibility/resistance.tif", overwrite = TRUE)
-writeRaster(road_raster, "data/site_accessibility/roads.tif", overwrite = TRUE)
-
-# Run accumulated cost
-wbt_cost_distance(
-  cost = "data/site_accessibility/resistance.tif",
-  source = "data/site_accessibility/roads.tif",
-  out_accum = "data/site_accessibility/accumulated_cost_to_roads.tif",
-  out_backlink = "data/site_accessibility/accumulated_cost_to_roads_backlink.tif", 
-  verbose_mode = TRUE
+# We create the tile_df using every single row provided by the tiling function
+tile_df <- data.frame(
+  b_xmin = tile_mat[, 1], b_xmax = tile_mat[, 2], # Buffered bounds
+  b_ymin = tile_mat[, 3], b_ymax = tile_mat[, 4],
+  xmin   = tile_mat[, 1] + 10000, xmax   = tile_mat[, 2] - 10000, # Reconstruct original bounds
+  ymin   = tile_mat[, 3] + 10000, ymax   = tile_mat[, 4] - 10000
 )
 
-cost_accum = rast("data/site_accessibility/accumulated_cost_to_roads.tif")
+# --- 4. Filtering and Processing ---
+dir.create("data/site_accessibility/temp", recursive = TRUE, showWarnings = FALSE)
+dir.create("data/site_accessibility/final", recursive = TRUE, showWarnings = FALSE)
 
+# Clean up any old partial results to ensure a fresh, clean mosaic
+# unlink("data/site_accessibility/final/*") 
+
+cat("Aligning master rasters (pixel-perfect sync)...\n")
+road_raster <- resample(road_raster, combined_resistance, method = "near")
+
+cat("Starting robust tiled processing...\n")
+
+for (i in 1:nrow(tile_df)) {
+  f_tile  <- paste0("data/site_accessibility/final/tile_", i, ".tif")
+  
+  # RESUME: skip if already done
+  if (file.exists(f_tile)) next
+  
+  # 1. Define buffered extent
+  e_buff_raw <- ext(as.numeric(tile_df[i, 1:4]))
+  
+  # 2. Crop Resistance with 'extend=TRUE' for coastlines
+  res_sub <- try({
+    tmp <- crop(combined_resistance, e_buff_raw, snap = "out", extend = TRUE)
+    if(all(is.na(values(tmp)))) return(NULL)
+    tmp
+  }, silent = TRUE)
+  
+  if (inherits(res_sub, "try-error") || is.null(res_sub)) next
+  
+  # 3. PIXEL-SYNC: Force road_sub to match res_sub's exact grid
+  road_sub <- crop(road_raster, res_sub, snap = "near")
+  
+  if (!all(dim(res_sub) == dim(road_sub))) {
+    road_sub <- resample(road_sub, res_sub, method = "near")
+  }
+  ext(road_sub) <- ext(res_sub)
+  
+  # Skip if no roads are found (essential for cost distance)
+  if (all(is.na(values(road_sub)))) next
+  
+  cat("Processing tile", i, "of", nrow(tile_df), "\n")
+  
+  # --- File Paths ---
+  t_res   <- paste0("data/site_accessibility/temp/res_", i, ".tif")
+  t_road  <- paste0("data/site_accessibility/temp/road_", i, ".tif")
+  t_accum <- paste0("data/site_accessibility/temp/accum_", i, ".tif")
+  t_back  <- paste0("data/site_accessibility/temp/back_", i, ".tif")
+  
+  writeRaster(res_sub, t_res, overwrite = TRUE, datatype = "FLT4S")
+  writeRaster(road_sub, t_road, overwrite = TRUE, datatype = "FLT4S")
+  
+  # 4. Whitebox Calculation
+  wbt_cost_distance(
+    cost = t_res, 
+    source = t_road, 
+    out_accum = t_accum,
+    out_backlink = t_back
+  )
+  
+  # 5. TRIM AND SAVE: Remove the 5km buffer
+  if (file.exists(t_accum)) {
+    accum_r <- rast(t_accum)
+    e_orig_raw <- ext(as.numeric(tile_df[i, 5:8]))
+    
+    # Use extend=TRUE to handle coastal tiles hanging into the void
+    final_r <- try(crop(accum_r, e_orig_raw, snap = "near", extend = TRUE), silent = TRUE)
+    
+    if (!inherits(final_r, "try-error") && !is.null(final_r)) {
+      if (!all(is.na(values(final_r)))) {
+        writeRaster(final_r, f_tile, overwrite = TRUE, datatype = "FLT4S")
+      }
+    }
+  }
+  
+  # Cleanup temp files for this tile
+  temp_to_clean <- c(t_res, t_road, t_accum, t_back)
+  file.remove(temp_to_clean[file.exists(temp_to_clean)])
+}
+
+# --- 5. Reassemble the Tiles ---
+tile_files <- list.files("data/site_accessibility/final", pattern = "\\.tif$", full.names = TRUE)
+
+if (length(tile_files) > 0) {
+  vrt_path <- "data/site_accessibility/iceland_accessibility_10m.vrt"
+  vrt(tile_files, vrt_path, overwrite = TRUE)
+  
+  # Final Plotting
+  final_map <- rast(vrt_path)
+  # Set 0 to NA for better visualization (ocean/roads) if needed
+  # final_map[final_map == 0] <- NA 
+  
+  plot(final_map, main = "Complete Accessibility Model", col = terrain.colors(50))
+}
+
+library(terra)
+
+tile_files <- list.files(
+  "data/site_accessibility/final",
+  pattern = "\\.tif$",
+  full.names = TRUE
+)
+
+if (length(tile_files) > 0) {
+  
+  vrt_path <- "data/site_accessibility/iceland_accessibility_10m.vrt"
+  tif_path <- "data/site_accessibility/iceland_accessibility_10m.tif"
+  
+  # 1. Build virtual raster (no alignment issues)
+  vrt(tile_files, vrt_path, overwrite = TRUE)
+  
+  # 2. Load VRT
+  final_map <- rast(vrt_path)
+  
+  # Optional: set 0 to NA
+  # final_map[final_map == 0] <- NA
+  
+  # 3. Write out a real GeoTIFF
+  writeRaster(
+    final_map,
+    tif_path,
+    overwrite = TRUE,
+    gdal = c("COMPRESS=LZW", "TILED=YES", "BIGTIFF=YES")
+  )
+  
+  # Sanity check
+  plot(final_map, main = "Complete Accessibility Model", col = terrain.colors(50))
+}
