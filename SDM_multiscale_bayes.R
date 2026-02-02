@@ -117,8 +117,8 @@ balanced_priors <- c(
   
   # 2. VARI Refinement (Spectral n-shape)
   # We use 'IVARIE2' because your get_prior showed that specific name.
-  prior(normal(1, 0.5), class = "b", coef = "VARI"),
-  prior(normal(-1, 0.5), class = "b", coef = "IVARIE2"), 
+  prior(normal(1, 1), class = "b", coef = "VARI"),
+  prior(normal(-1, 1), class = "b", coef = "IVARIE2"), 
   
   # 3. THE SMOOTH MUZZLE (Global)
   # This controls s(solar), s(twi), and s(slope). 
