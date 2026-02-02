@@ -569,7 +569,7 @@ for (f in future_files) {
 tau_thresh      <- 0.5   # Binary suitability threshold
 weights         <- c(persist = 0.6, meanp = 0.3, survival = 0.1) 
 power_gamma     <- 1.4   # Gamma transformation to highlight core refugia
-n_draws         <- 2    # Number of Bayesian posterior draws
+n_draws         <- 50    # Number of Bayesian posterior draws
 viability_limit <- 0.6   
 
 # Paths (Adjusted to your specific Windows directory)
@@ -706,7 +706,7 @@ library(progress)
 # -----------------------------
 input_dir   <- "models/refugia_realizations_stacks"
 output_path <- "models/grand_unifying_refugia_map.tif"
-agreement_threshold <- 0.7  # Score above which a cell is "Strict Refugium"
+agreement_threshold <- 0.6  # Score above which a cell is "Strict Refugium"
 
 # -----------------------------
 # AGGREGATION ENGINE
