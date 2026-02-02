@@ -99,39 +99,44 @@ colnames(analysis_df)
 # Transform probability to logit scale for the offset
 analysis_df$logit_rf <- car::logit(analysis_df$sdm, adjust = 0.01)
 
+# 1. Ensure the formula is correct
 birch_forestry_formula <- bf(
   presence ~ 
     logit_rf + 
     solar + 
     twi + 
-    tpi + 
     s(slope, k = 5) + 
-    VARI + I(VARI^2) # This creates the 'n-shape'
+    tpi + 
+    VARI + I(VARI^2)
 )
 
+# 2. Match the priors to your specific get_prior output
 balanced_priors <- c(
-  # THE MASTER ANCHOR: Triple the weight to ensure climate envelope dominance
-  # A coefficient of 3 in logit space means the RF score has a massive veto power.
+  # 1. The Climate Anchor (Macro-scale)
   prior(normal(3, 0.1), class = "b", coef = "logit_rf"),
   
-  # The 'n-shape' Logic (Moderated):
-  # Lowered the means so VARI refines the envelope rather than replacing it.
-  prior(normal(1.5, 0.5), class = "b", coef = "VARI"),
-  prior(normal(-1.5, 0.5), class = "b", coef = "IVARIE2"), 
+  # 2. VARI Refinement (Spectral n-shape)
+  # We use 'IVARIE2' because your get_prior showed that specific name.
+  prior(normal(1, 0.5), class = "b", coef = "VARI"),
+  prior(normal(-1, 0.5), class = "b", coef = "IVARIE2"), 
   
-  # Physical Constraints: 
-  # These remain as secondary 'filters' for local placement.
-  prior(normal(1, 0.5), class = "b", coef = "solar"),
-  prior(normal(-1, 0.5), class = "b", coef = "twi"),
+  # 3. THE SMOOTH MUZZLE (Global)
+  # This controls s(solar), s(twi), and s(slope). 
+  # Since brms doesn't see b_solar or b_twi, we control them here.
+  prior(student_t(3, 0, 0.3), class = "sds"), 
+  
+  # 4. Slope's Linear Piece
+  # Your get_prior specifically showed 'sslope_1' exists.
+  prior(normal(0, 0.5), class = "b", coef = "sslope_1"),
+  
+  # 5. Fixed Effect for TPI
   prior(normal(0, 1), class = "b", coef = "tpi"),
+  prior(normal(0, 1), class = "b", coef = "twi"),
+  prior(normal(0, 1), class = "b", coef = "solar"),
   
-  # Topographic Texture
-  prior(normal(0, 1), class = "sds"),
-  
-  # Intercept: Slightly more negative to keep the model 'conservative'
-  prior(normal(-2, 1), class = "Intercept")
+  # 6. Intercept (Skeptical Baseline)
+  prior(normal(-7, 1), class = "Intercept")
 )
-
 # 3. Running the Model
 fit_birch_final <- brm(
   formula = birch_forestry_formula,
@@ -187,4 +192,4 @@ result_raster <- rast(final_df, type = "xyz", crs = crs(env_stack))
 # Optional: Rename layers for clarity
 names(result_raster) <- c("Suitability_Mean", "Uncertainty_SD", "Prob_Success_60")
 
-writeRaster(result_raster, "models/multiscale_SDM_bayes.tif")
+writeRaster(result_raster, "models/multiscale_SDM_bayes.tif", overwrite = T)
